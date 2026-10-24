@@ -15,6 +15,7 @@
 #   time-sync.sh set-time <время>
 #   time-sync.sh time-server [время] [--allow a.b.c.d/nn]
 #   time-sync.sh sync-from <ip-сервера-времени>
+#   time-sync.sh check
 #
 # Примеры:
 #   time-sync.sh set-time 1761307080
@@ -51,11 +52,15 @@ UNIT=
 NTP_VARIANT=ntp
 POLICY_ADDED=0
 TMP_FILE=
+PARSE_TMP=
 FAILS=0
 
 cleanup() {
   if [ -n "${TMP_FILE:-}" ] && [ -f "$TMP_FILE" ]; then
     rm -f "$TMP_FILE"
+  fi
+  if [ -n "${PARSE_TMP:-}" ] && [ -f "$PARSE_TMP" ]; then
+    rm -f "$PARSE_TMP"
   fi
   if [ "${POLICY_ADDED:-0}" -eq 1 ]; then
     rm -f /usr/sbin/policy-rc.d
@@ -80,6 +85,7 @@ usage() {
   time-sync.sh set-time <время>
   time-sync.sh time-server [время] [--allow a.b.c.d/nn]
   time-sync.sh sync-from <адрес-сервера-времени>
+  time-sync.sh check
   time-sync.sh --dry-run <режим> [аргументы]
   time-sync.sh self-test
 
@@ -94,8 +100,9 @@ usage() {
   set-time      выставить время и выключить синхронизацию
   time-server   сделать это устройство сервером времени (udp/123)
   sync-from     брать время с сервера, настроенного как time-server
+  check         показать время, роль сервера и адрес внешнего сервера
 
-Дополнительные имена режимов: set, server, client, время, сервер, клиент.
+Дополнительные имена режимов: set, server, client, check, время, сервер, клиент, проверка.
 
 Логин, пароль и IP подключения скрипт не принимает: их использует SSH установщика.
 Пароль в аргументы не передавайте.
@@ -176,6 +183,9 @@ parse_args() {
     client|sync-from|sync_from|sync|клиент)
       ACTION=sync-from
       ;;
+    check|проверка)
+      ACTION=check
+      ;;
     self-test)
       ACTION=self-test
       ;;
@@ -184,7 +194,7 @@ parse_args() {
       exit 1
       ;;
     *)
-      die "Неизвестный режим: ${ACTION}. Допустимо: set-time, time-server, sync-from."
+      die "Неизвестный режим: ${ACTION}. Допустимо: set-time, time-server, sync-from, check."
       ;;
   esac
 
@@ -399,6 +409,11 @@ validate_args() {
       fi
       SERVER=$REST
       ;;
+    check)
+      if [ -n "$REST" ]; then
+        die "Режим check не принимает дополнительные аргументы."
+      fi
+      ;;
     self-test)
       ;;
   esac
@@ -406,7 +421,7 @@ validate_args() {
 }
 
 needs_privilege() {
-  if [ "$DRY_RUN" -eq 1 ] || [ "$ACTION" = "self-test" ]; then
+  if [ "$DRY_RUN" -eq 1 ] || [ "$ACTION" = "self-test" ] || [ "$ACTION" = "check" ]; then
     return 1
   fi
   return 0
@@ -1272,6 +1287,415 @@ print_ok() {
   printf 'CHRONOSYNC_OK %s\n' "$*"
 }
 
+trim_line() {
+  local t
+  t=$1
+  while [ -n "$t" ] && [ "${t#[[:space:]]}" != "$t" ]; do
+    t=${t#[[:space:]]}
+  done
+  while [ -n "$t" ] && [ "${t%[[:space:]]}" != "$t" ]; do
+    t=${t%[[:space:]]}
+  done
+  TRIMMED=$t
+}
+
+add_upstream() {
+  local host
+  host=$1
+  if [ -z "$host" ]; then
+    return 0
+  fi
+  case " ${ROLE_UPSTREAMS} " in
+    *" ${host} "*)
+      return 0
+      ;;
+  esac
+  if [ -z "$ROLE_UPSTREAMS" ]; then
+    ROLE_UPSTREAMS=$host
+  else
+    ROLE_UPSTREAMS="${ROLE_UPSTREAMS} ${host}"
+  fi
+  return 0
+}
+
+add_words_upstream() {
+  local rest word
+  rest=$1
+  trim_line "$rest"
+  rest=$TRIMMED
+  while [ -n "$rest" ]; do
+    word=${rest%% *}
+    add_upstream "$word"
+    case "$rest" in
+      *" "*)
+        rest=${rest#* }
+        trim_line "$rest"
+        rest=$TRIMMED
+        ;;
+      *)
+        rest=
+        ;;
+    esac
+  done
+  return 0
+}
+
+parse_time_config() {
+  local kind line word host
+  kind=$1
+  ROLE_SERVER=0
+  ROLE_UPSTREAMS=
+  TS_NTP=
+  TS_FALLBACK=
+  PARSE_TMP="/tmp/chronosync-parse.$$"
+  printf '%s\n' "$2" > "$PARSE_TMP" || return 1
+  while IFS= read -r line; do
+    line=${line%%#*}
+    trim_line "$line"
+    line=$TRIMMED
+    if [ -z "$line" ]; then
+      continue
+    fi
+    case "$kind" in
+      timesyncd)
+        case "$line" in
+          NTP=*)
+            TS_NTP=${line#NTP=}
+            ;;
+          FallbackNTP=*)
+            TS_FALLBACK=${line#FallbackNTP=}
+            ;;
+        esac
+        continue
+        ;;
+    esac
+    word=${line%% *}
+    case "$line" in
+      *" "*)
+        host=${line#* }
+        host=${host%% *}
+        ;;
+      *)
+        host=
+        ;;
+    esac
+    case "$kind" in
+      chrony)
+        case "$word" in
+          local|allow)
+            ROLE_SERVER=1
+            ;;
+          server|pool|peer)
+            add_upstream "$host"
+            ;;
+        esac
+        ;;
+      ntp)
+        case "$word" in
+          server|pool|peer)
+            case "$host" in
+              127.127.*)
+                ROLE_SERVER=1
+                ;;
+              "")
+                ;;
+              *)
+                add_upstream "$host"
+                ;;
+            esac
+            ;;
+          tos)
+            case "$line" in
+              *orphan*)
+                ROLE_SERVER=1
+                ;;
+            esac
+            ;;
+        esac
+        ;;
+    esac
+  done < "$PARSE_TMP"
+  rm -f "$PARSE_TMP"
+  PARSE_TMP=
+  if [ "$kind" = "timesyncd" ]; then
+    add_words_upstream "$TS_NTP"
+    add_words_upstream "$TS_FALLBACK"
+  fi
+  return 0
+}
+
+append_file() {
+  local chunk
+  if [ ! -f "$1" ] || [ ! -r "$1" ]; then
+    return 0
+  fi
+  chunk=$(cat "$1" 2>/dev/null || true)
+  COLLECTED="${COLLECTED}
+${chunk}"
+  return 0
+}
+
+collect_configs() {
+  local kind f
+  kind=$1
+  COLLECTED=
+  case "$kind" in
+    chrony)
+      append_file /etc/chrony/chrony.conf
+      append_file /etc/chrony.conf
+      for f in /etc/chrony/conf.d/*.conf /etc/chrony/sources.d/*.sources; do
+        append_file "$f"
+      done
+      ;;
+    ntp)
+      append_file /etc/ntp.conf
+      append_file /etc/ntp/ntp.conf
+      append_file /etc/ntpsec/ntp.conf
+      ;;
+    timesyncd)
+      append_file /etc/systemd/timesyncd.conf
+      for f in /etc/systemd/timesyncd.conf.d/*.conf; do
+        append_file "$f"
+      done
+      ;;
+  esac
+  return 0
+}
+
+engine_service_state() {
+  local unit
+  ENGINE_SERVICE_STATE=missing
+  if ! command -v systemctl >/dev/null 2>&1; then
+    ENGINE_SERVICE_STATE=unknown
+    return 0
+  fi
+  for unit in "$@"; do
+    if unit_exists "$unit"; then
+      if systemctl is-active --quiet "$unit" >/dev/null 2>&1; then
+        ENGINE_SERVICE_STATE=active
+        return 0
+      fi
+      ENGINE_SERVICE_STATE=inactive
+    fi
+  done
+  return 0
+}
+
+eval_engine() {
+  local kind
+  kind=$1
+  shift
+  collect_configs "$kind"
+  parse_time_config "$kind" "$COLLECTED" || return 1
+  engine_service_state "$@"
+  if [ "$kind" = "timesyncd" ] && [ "$ENGINE_SERVICE_STATE" = "active" ] && [ -z "$ROLE_UPSTREAMS" ]; then
+    ROLE_DEFAULT_UPSTREAM=1
+  else
+    ROLE_DEFAULT_UPSTREAM=0
+  fi
+  return 0
+}
+
+consider_role() {
+  if [ "$CHOSEN" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$2" != "$6" ]; then
+    return 0
+  fi
+  if [ "$6" != "active" ]; then
+    if [ "$3" -eq 0 ] && [ -z "$4" ] && [ "$5" -eq 0 ]; then
+      return 0
+    fi
+  fi
+  CHOSEN=1
+  ROLE_ENGINE=$1
+  ROLE_STATE=$2
+  ROLE_SERVER=$3
+  ROLE_UPSTREAMS=$4
+  ROLE_DEFAULT_UPSTREAM=$5
+  return 0
+}
+
+query_sync() {
+  local sources value
+  SYNC_STATE=no
+  if [ "$ROLE_STATE" != "active" ]; then
+    return 0
+  fi
+  if [ -z "$ROLE_UPSTREAMS" ] && [ "$ROLE_DEFAULT_UPSTREAM" -eq 0 ]; then
+    return 0
+  fi
+  case "$ROLE_ENGINE" in
+    chrony)
+      if ! command -v chronyc >/dev/null 2>&1; then
+        SYNC_STATE=unknown
+        return 0
+      fi
+      sources=$(LC_ALL=C chronyc -c sources 2>/dev/null || true)
+      if [ -z "$sources" ]; then
+        SYNC_STATE=unknown
+        return 0
+      fi
+      if chrony_csv_synced "$sources"; then
+        SYNC_STATE=yes
+      else
+        SYNC_STATE=no
+      fi
+      ;;
+    ntp)
+      sources=$(ntp_query)
+      if [ -z "$sources" ]; then
+        SYNC_STATE=unknown
+        return 0
+      fi
+      if printf '%s\n' "$sources" | grep -F '*' >/dev/null 2>&1; then
+        SYNC_STATE=yes
+      else
+        SYNC_STATE=no
+      fi
+      ;;
+    timesyncd)
+      value=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+      if [ "$value" = "yes" ]; then
+        SYNC_STATE=yes
+      elif [ "$value" = "no" ]; then
+        SYNC_STATE=no
+      else
+        SYNC_STATE=unknown
+      fi
+      ;;
+  esac
+  return 0
+}
+
+do_check() {
+  local epoch local_time utc_time server_yes client_yes svc sync_word role_name servers_csv engine_out label
+  epoch=$(date +%s)
+  local_time=$(date '+%Y-%m-%d %H:%M:%S %Z')
+  utc_time=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+  log "Время устройства (локальное): ${local_time}"
+  log "Время устройства (UTC): ${utc_time}"
+  log "Unix-время: ${epoch}"
+
+  eval_engine chrony chrony chronyd || die "Не удалось прочитать конфигурацию chrony."
+  CY_SERVER=$ROLE_SERVER
+  CY_UP=$ROLE_UPSTREAMS
+  CY_STATE=$ENGINE_SERVICE_STATE
+  CY_DEF=$ROLE_DEFAULT_UPSTREAM
+
+  eval_engine ntp ntp ntpd ntpsec || die "Не удалось прочитать конфигурацию ntp."
+  NP_SERVER=$ROLE_SERVER
+  NP_UP=$ROLE_UPSTREAMS
+  NP_STATE=$ENGINE_SERVICE_STATE
+  NP_DEF=$ROLE_DEFAULT_UPSTREAM
+
+  eval_engine timesyncd systemd-timesyncd || die "Не удалось прочитать конфигурацию systemd-timesyncd."
+  TD_SERVER=$ROLE_SERVER
+  TD_UP=$ROLE_UPSTREAMS
+  TD_STATE=$ENGINE_SERVICE_STATE
+  TD_DEF=$ROLE_DEFAULT_UPSTREAM
+
+  CHOSEN=0
+  ROLE_ENGINE=
+  ROLE_STATE=missing
+  ROLE_SERVER=0
+  ROLE_UPSTREAMS=
+  ROLE_DEFAULT_UPSTREAM=0
+  consider_role chrony "$CY_STATE" "$CY_SERVER" "$CY_UP" "$CY_DEF" active
+  consider_role ntp "$NP_STATE" "$NP_SERVER" "$NP_UP" "$NP_DEF" active
+  consider_role timesyncd "$TD_STATE" "$TD_SERVER" "$TD_UP" "$TD_DEF" active
+  consider_role chrony "$CY_STATE" "$CY_SERVER" "$CY_UP" "$CY_DEF" inactive
+  consider_role ntp "$NP_STATE" "$NP_SERVER" "$NP_UP" "$NP_DEF" inactive
+  consider_role timesyncd "$TD_STATE" "$TD_SERVER" "$TD_UP" "$TD_DEF" inactive
+  consider_role chrony "$CY_STATE" "$CY_SERVER" "$CY_UP" "$CY_DEF" unknown
+  consider_role ntp "$NP_STATE" "$NP_SERVER" "$NP_UP" "$NP_DEF" unknown
+  consider_role timesyncd "$TD_STATE" "$TD_SERVER" "$TD_UP" "$TD_DEF" unknown
+
+  if [ "$ROLE_SERVER" -eq 1 ]; then
+    server_yes=да
+  else
+    server_yes=нет
+  fi
+  if [ -n "$ROLE_UPSTREAMS" ] || [ "$ROLE_DEFAULT_UPSTREAM" -eq 1 ]; then
+    client_yes=да
+  else
+    client_yes=нет
+  fi
+  log "Сервер времени: ${server_yes}"
+  log "Клиент сервера времени: ${client_yes}"
+  if [ "$client_yes" = "да" ]; then
+    if [ "$ROLE_DEFAULT_UPSTREAM" -eq 1 ]; then
+      log "Сервер синхронизации: встроенный список systemd-timesyncd"
+    else
+      log "Сервер синхронизации: ${ROLE_UPSTREAMS}"
+    fi
+  fi
+  case "$ROLE_STATE" in
+    active)
+      label=$ROLE_ENGINE
+      if [ "$ROLE_ENGINE" = "timesyncd" ]; then
+        label=systemd-timesyncd
+      fi
+      svc="${label} (запущена)"
+      ;;
+    inactive)
+      label=$ROLE_ENGINE
+      if [ "$ROLE_ENGINE" = "timesyncd" ]; then
+        label=systemd-timesyncd
+      fi
+      svc="${label} (не запущена)"
+      ;;
+    unknown)
+      label=$ROLE_ENGINE
+      if [ "$ROLE_ENGINE" = "timesyncd" ]; then
+        label=systemd-timesyncd
+      fi
+      svc="${label} (состояние неизвестно)"
+      ;;
+    *)
+      svc=нет
+      ;;
+  esac
+  log "Служба: ${svc}"
+  query_sync
+  case "$SYNC_STATE" in
+    yes)
+      sync_word=да
+      ;;
+    no)
+      sync_word=нет
+      ;;
+    *)
+      sync_word="нет данных"
+      ;;
+  esac
+  log "Синхронизация с внешним сервером: ${sync_word}"
+
+  if [ "$server_yes" = "да" ] && [ "$client_yes" = "да" ]; then
+    role_name=both
+  elif [ "$server_yes" = "да" ]; then
+    role_name=server
+  elif [ "$client_yes" = "да" ]; then
+    role_name=client
+  else
+    role_name=none
+  fi
+  if [ "$ROLE_DEFAULT_UPSTREAM" -eq 1 ]; then
+    servers_csv=default
+  elif [ -n "$ROLE_UPSTREAMS" ]; then
+    servers_csv=$(printf '%s' "$ROLE_UPSTREAMS" | tr ' ' ',')
+  else
+    servers_csv=-
+  fi
+  if [ -n "$ROLE_ENGINE" ]; then
+    engine_out=$ROLE_ENGINE
+  else
+    engine_out=none
+  fi
+  print_ok "mode=check role=${role_name} engine=${engine_out} server=${servers_csv} synced=${SYNC_STATE} time=${epoch}"
+}
+
 do_set_time() {
   log "Режим: установка времени с машины установщика."
   disable_all_time_services || return 1
@@ -1454,6 +1878,42 @@ self_test() {
     FAILS=$((FAILS + 1))
   fi
 
+  ALLOW=
+  SERVER=192.168.0.10
+  parse_time_config chrony "$(build_chrony_server_conf)" || die "parse chrony server"
+  check_eq "parse server flag" "$ROLE_SERVER" "1"
+  check_eq "parse server up" "$ROLE_UPSTREAMS" ""
+  parse_time_config chrony "$(build_chrony_client_conf)" || die "parse chrony client"
+  check_eq "parse client flag" "$ROLE_SERVER" "0"
+  check_eq "parse client up" "$ROLE_UPSTREAMS" "192.168.0.10"
+  parse_time_config chrony "# server 1.2.3.4 iburst
+local stratum 8"
+  check_eq "parse comment flag" "$ROLE_SERVER" "1"
+  check_eq "parse comment up" "$ROLE_UPSTREAMS" ""
+  parse_time_config chrony "local stratum 8
+server 10.0.0.5 iburst"
+  check_eq "parse both flag" "$ROLE_SERVER" "1"
+  check_eq "parse both up" "$ROLE_UPSTREAMS" "10.0.0.5"
+  NTP_VARIANT=ntp
+  ALLOW=
+  parse_time_config ntp "$(build_ntp_server_conf)" || die "parse ntp server"
+  check_eq "parse ntp server flag" "$ROLE_SERVER" "1"
+  check_eq "parse ntp server up" "$ROLE_UPSTREAMS" ""
+  SERVER=10.1.2.3
+  parse_time_config ntp "$(build_ntp_client_conf)" || die "parse ntp client"
+  check_eq "parse ntp client flag" "$ROLE_SERVER" "0"
+  check_eq "parse ntp client up" "$ROLE_UPSTREAMS" "10.1.2.3"
+  parse_time_config timesyncd "[Time]
+#NTP=pool.ntp.org
+NTP=192.168.1.5
+FallbackNTP=10.0.0.5"
+  check_eq "parse ts flag" "$ROLE_SERVER" "0"
+  check_eq "parse ts up" "$ROLE_UPSTREAMS" "192.168.1.5 10.0.0.5"
+  parse_time_config timesyncd "[Time]
+NTP=1.1.1.1
+NTP=8.8.8.8"
+  check_eq "parse ts last" "$ROLE_UPSTREAMS" "8.8.8.8"
+
   if [ "$FAILS" -ne 0 ]; then
     printf 'self-test: FAIL %s\n' "$FAILS" >&2
     exit 1
@@ -1490,6 +1950,9 @@ main() {
       ;;
     sync-from)
       do_sync_from
+      ;;
+    check)
+      do_check
       ;;
     *)
       die "Неизвестный режим."

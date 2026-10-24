@@ -76,6 +76,7 @@ fi
 
 run_case "help" 0 dash "$SCRIPT" --help
 assert_contains "help sync-from" "sync-from"
+assert_contains "help check" "check"
 assert_not_contains "help ok" "CHRONOSYNC_OK"
 
 run_case "no args" 1 dash "$SCRIPT"
@@ -167,6 +168,30 @@ assert_not_contains "timesyncd server ok" "CHRONOSYNC_OK"
 
 run_case "bad engine" 1 env CHRONOSYNC_ENGINE=openntpd dash "$SCRIPT" --dry-run time-server
 assert_not_contains "bad engine ok" "CHRONOSYNC_OK"
+
+before=$(date +%s)
+run_case "check" 0 dash "$SCRIPT" check
+after=$(date +%s)
+delta=$((after - before))
+if [ "$delta" -lt 0 ]; then
+  delta=$((-delta))
+fi
+if [ "$delta" -gt 30 ]; then
+  printf 'FAIL check изменил часы на %s с\n' "$delta" >&2
+  FAIL=1
+else
+  printf 'OK check clock\n'
+fi
+assert_contains "check local" "Время устройства (локальное):"
+assert_contains "check utc" "Время устройства (UTC):"
+assert_contains "check unix" "Unix-время:"
+assert_contains "check is server" "Сервер времени:"
+assert_contains "check is client" "Клиент сервера времени:"
+assert_contains "check ok" "CHRONOSYNC_OK mode=check"
+run_case "check extra" 1 dash "$SCRIPT" check лишнее
+assert_not_contains "check extra ok" "CHRONOSYNC_OK"
+run_case "check alias" 0 dash "$SCRIPT" проверка
+assert_contains "check alias ok" "CHRONOSYNC_OK mode=check"
 
 if [ "$FAIL" -ne 0 ]; then
   printf 'Тесты не прошли\n' >&2
