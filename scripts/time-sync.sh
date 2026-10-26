@@ -26,6 +26,10 @@
 #   time-sync.sh restore /var/lib/chronosync/backups/client
 #
 # set-time only sets the clock and turns NTP off.
+# After set-time, run the role again: time-server to publish this clock,
+# or sync-from to follow a server. Until then the device does not distribute
+# time and does not follow a server. sync-from replaces a manual client clock
+# with the server clock.
 # time-server sets the clock (when a time is given) and serves it on udp/123
 # to private networks. The server does not use the Internet: the source is the set time.
 # sync-from makes the device follow only the given server.
@@ -119,6 +123,13 @@ Modes:
   sync-from     follow a server configured with time-server
   check         show the time, server role, and upstream server address
   restore       restore settings from a file saved with --backup
+
+set-time only sets the clock and turns synchronization off.
+After set-time, run the role again:
+  time-sync.sh time-server              publish this clock to clients
+  time-sync.sh sync-from <address>      follow a time server again
+Until then the device does not distribute time and does not follow a server.
+sync-from replaces a manual client clock with the server clock.
 
 Also accepted: set, server, client, check, restore, время, сервер, клиент, проверка, восстановление.
 

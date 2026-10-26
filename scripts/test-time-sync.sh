@@ -76,6 +76,8 @@ fi
 
 run_case "help" 0 dash "$SCRIPT" --help
 assert_contains "help sync-from" "sync-from"
+assert_contains "help manual restart" "After set-time, run the role again"
+assert_contains "help manual server" "does not distribute time"
 assert_contains "help check" "check"
 assert_contains "help restore" "restore"
 assert_contains "help backup" "--backup"
