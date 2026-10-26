@@ -12,15 +12,18 @@
 # (Qt: QDateTime::currentSecsSinceEpoch()), сразу перед вызовом.
 # Так часовой пояс устройства не влияет на абсолютное время.
 #
-#   time-sync.sh set-time <время>
-#   time-sync.sh time-server [время] [--allow a.b.c.d/nn]
-#   time-sync.sh sync-from <ip-сервера-времени>
+#   time-sync.sh set-time <время> [--backup <каталог>]
+#   time-sync.sh time-server [время] [--allow a.b.c.d/nn] [--backup <каталог>]
+#   time-sync.sh sync-from <ip-сервера-времени> [--backup <каталог>]
+#   time-sync.sh restore <файл-сохранённых-настроек>
 #   time-sync.sh check
 #
 # Примеры:
 #   time-sync.sh set-time 1761307080
 #   time-sync.sh time-server 1761307080
 #   time-sync.sh sync-from 192.168.0.10
+#   time-sync.sh --backup /var/lib/chronosync/backups set-time 1761307080
+#   time-sync.sh restore /var/lib/chronosync/backups/client
 #
 # set-time только выставляет часы и выключает NTP.
 # time-server выставляет часы (если время передано) и раздаёт их по udp/123
@@ -54,6 +57,19 @@ POLICY_ADDED=0
 TMP_FILE=
 PARSE_TMP=
 FAILS=0
+BACKUP_DIR=
+RESTORE_FILE=
+BACKUP_ROLE=
+BACKUP_ENGINE=
+BACKUP_SERVERS=
+BACKUP_DEFAULT_UPSTREAM=0
+BACKUP_ALLOW=
+PROBE_ROLE_ENGINE=
+PROBE_ROLE_STATE=
+PROBE_ROLE_SERVER=0
+PROBE_ROLE_UPSTREAMS=
+PROBE_ROLE_DEFAULT_UPSTREAM=0
+PROBE_ROLE_NAME=
 
 cleanup() {
   if [ -n "${TMP_FILE:-}" ] && [ -f "$TMP_FILE" ]; then
@@ -84,7 +100,8 @@ usage() {
 Использование:
   time-sync.sh set-time <время>
   time-sync.sh time-server [время] [--allow a.b.c.d/nn]
-  time-sync.sh sync-from <адрес-сервера-времени>
+  time-sync.sh sync-from <адрес-сервера-времени> [--backup <каталог>]
+  time-sync.sh restore <файл-сохранённых-настроек>
   time-sync.sh check
   time-sync.sh --dry-run <режим> [аргументы]
   time-sync.sh self-test
@@ -101,8 +118,12 @@ usage() {
   time-server   сделать это устройство сервером времени (udp/123)
   sync-from     брать время с сервера, настроенного как time-server
   check         показать время, роль сервера и адрес внешнего сервера
+  restore       восстановить настройки из файла, сохранённого через --backup
 
-Дополнительные имена режимов: set, server, client, check, время, сервер, клиент, проверка.
+Дополнительные имена режимов: set, server, client, check, restore, время, сервер, клиент, проверка, восстановление.
+
+--backup <каталог> перед set-time, time-server или sync-from сохраняет текущие настройки
+в каталоге файлом server, client, both или none (по текущей роли), затем применяет новый режим.
 
 Логин, пароль и IP подключения скрипт не принимает: их использует SSH установщика.
 Пароль в аргументы не передавайте.
@@ -125,11 +146,20 @@ parse_args() {
   REST=
   ALLOW=
   ALLOW_FLAG=0
+  BACKUP_DIR=
+  RESTORE_FILE=
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run)
         DRY_RUN=1
         shift
+        ;;
+      --backup)
+        if [ $# -lt 2 ]; then
+          die "--backup требует каталог для сохранения настроек"
+        fi
+        BACKUP_DIR=$2
+        shift 2
         ;;
       --allow)
         if [ $# -lt 2 ]; then
@@ -186,6 +216,9 @@ parse_args() {
     check|проверка)
       ACTION=check
       ;;
+    restore|восстановление)
+      ACTION=restore
+      ;;
     self-test)
       ACTION=self-test
       ;;
@@ -207,6 +240,15 @@ parse_args() {
     fi
     ALLOW=
   fi
+  case "$ACTION" in
+    set-time|time-server|sync-from)
+      ;;
+    *)
+      if [ -n "$BACKUP_DIR" ]; then
+        die "--backup используется только с set-time, time-server или sync-from"
+      fi
+      ;;
+  esac
 }
 
 valid_octet() {
@@ -413,6 +455,17 @@ validate_args() {
       if [ -n "$REST" ]; then
         die "Режим check не принимает дополнительные аргументы."
       fi
+      ;;
+    restore)
+      if [ -z "$REST" ]; then
+        die "Укажите файл: time-sync.sh restore <файл-сохранённых-настроек>"
+      fi
+      case "$REST" in
+        *" "*)
+          die "Путь к файлу резервной копии — один аргумент, без пробелов."
+          ;;
+      esac
+      RESTORE_FILE=$REST
       ;;
     self-test)
       ;;
@@ -1569,28 +1622,20 @@ query_sync() {
   return 0
 }
 
-do_check() {
-  local epoch local_time utc_time server_yes client_yes svc sync_word role_name servers_csv engine_out label
-  epoch=$(date +%s)
-  local_time=$(date '+%Y-%m-%d %H:%M:%S %Z')
-  utc_time=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-  log "Время устройства (локальное): ${local_time}"
-  log "Время устройства (UTC): ${utc_time}"
-  log "Unix-время: ${epoch}"
-
-  eval_engine chrony chrony chronyd || die "Не удалось прочитать конфигурацию chrony."
+probe_device_role() {
+  eval_engine chrony chrony chronyd || return 1
   CY_SERVER=$ROLE_SERVER
   CY_UP=$ROLE_UPSTREAMS
   CY_STATE=$ENGINE_SERVICE_STATE
   CY_DEF=$ROLE_DEFAULT_UPSTREAM
 
-  eval_engine ntp ntp ntpd ntpsec || die "Не удалось прочитать конфигурацию ntp."
+  eval_engine ntp ntp ntpd ntpsec || return 1
   NP_SERVER=$ROLE_SERVER
   NP_UP=$ROLE_UPSTREAMS
   NP_STATE=$ENGINE_SERVICE_STATE
   NP_DEF=$ROLE_DEFAULT_UPSTREAM
 
-  eval_engine timesyncd systemd-timesyncd || die "Не удалось прочитать конфигурацию systemd-timesyncd."
+  eval_engine timesyncd systemd-timesyncd || return 1
   TD_SERVER=$ROLE_SERVER
   TD_UP=$ROLE_UPSTREAMS
   TD_STATE=$ENGINE_SERVICE_STATE
@@ -1611,6 +1656,492 @@ do_check() {
   consider_role chrony "$CY_STATE" "$CY_SERVER" "$CY_UP" "$CY_DEF" unknown
   consider_role ntp "$NP_STATE" "$NP_SERVER" "$NP_UP" "$NP_DEF" unknown
   consider_role timesyncd "$TD_STATE" "$TD_SERVER" "$TD_UP" "$TD_DEF" unknown
+
+  PROBE_ROLE_ENGINE=$ROLE_ENGINE
+  PROBE_ROLE_STATE=$ROLE_STATE
+  PROBE_ROLE_SERVER=$ROLE_SERVER
+  PROBE_ROLE_UPSTREAMS=$ROLE_UPSTREAMS
+  PROBE_ROLE_DEFAULT_UPSTREAM=$ROLE_DEFAULT_UPSTREAM
+
+  if [ "$PROBE_ROLE_SERVER" -eq 1 ] && { [ -n "$PROBE_ROLE_UPSTREAMS" ] || [ "$PROBE_ROLE_DEFAULT_UPSTREAM" -eq 1 ]; }; then
+    PROBE_ROLE_NAME=both
+  elif [ "$PROBE_ROLE_SERVER" -eq 1 ]; then
+    PROBE_ROLE_NAME=server
+  elif [ -n "$PROBE_ROLE_UPSTREAMS" ] || [ "$PROBE_ROLE_DEFAULT_UPSTREAM" -eq 1 ]; then
+    PROBE_ROLE_NAME=client
+  else
+    PROBE_ROLE_NAME=none
+  fi
+  return 0
+}
+
+default_allow_cidr() {
+  case "$1" in
+    10.0.0.0/8|172.16.0.0/12|192.168.0.0/16|169.254.0.0/16)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+extract_extra_allow() {
+  local kind line word cidr extra
+  extra=
+  kind=$1
+  collect_configs "$kind"
+  PARSE_TMP="/tmp/chronosync-allow.$$"
+  printf '%s\n' "$COLLECTED" > "$PARSE_TMP" || return 0
+  while IFS= read -r line; do
+    line=${line%%#*}
+    trim_line "$line"
+    line=$TRIMMED
+    if [ -z "$line" ]; then
+      continue
+    fi
+    word=${line%% *}
+    case "$kind" in
+      chrony)
+        if [ "$word" = "allow" ]; then
+          cidr=${line#allow }
+          cidr=${cidr%% *}
+          if ! default_allow_cidr "$cidr"; then
+            extra=$cidr
+          fi
+        fi
+        ;;
+    esac
+  done < "$PARSE_TMP"
+  rm -f "$PARSE_TMP"
+  PARSE_TMP=
+  printf '%s\n' "$extra"
+  return 0
+}
+
+backup_servers_csv() {
+  if [ "$PROBE_ROLE_DEFAULT_UPSTREAM" -eq 1 ]; then
+    printf '%s\n' default
+    return 0
+  fi
+  if [ -n "$PROBE_ROLE_UPSTREAMS" ]; then
+    printf '%s\n' "$PROBE_ROLE_UPSTREAMS" | tr ' ' ','
+    return 0
+  fi
+  printf '%s\n' "-"
+  return 0
+}
+
+write_backup_manifest() {
+  local dest role engine servers allow extra content
+  dest=$1
+  role=$2
+  engine=$3
+  servers=$4
+  allow=$5
+  content=$(cat <<EOF
+# chronosync-backup v1
+role=${role}
+engine=${engine}
+servers=${servers}
+default_upstream=${PROBE_ROLE_DEFAULT_UPSTREAM}
+allow=${allow}
+service_state=${PROBE_ROLE_STATE}
+EOF
+)
+  write_text "$dest" "$content" || return 1
+  return 0
+}
+
+maybe_backup_before_change() {
+  local dest servers allow extra engine_out
+  if [ -z "$BACKUP_DIR" ]; then
+    return 0
+  fi
+  if ! probe_device_role; then
+    die "Не удалось определить текущие настройки времени для резервной копии."
+  fi
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[dry-run] mkdir -p %s\n' "$BACKUP_DIR"
+  else
+    mkdir -p "$BACKUP_DIR" || die "Не удалось создать каталог резервной копии: ${BACKUP_DIR}"
+  fi
+  dest="${BACKUP_DIR}/${PROBE_ROLE_NAME}"
+  servers=$(backup_servers_csv)
+  allow=
+  if [ "$PROBE_ROLE_NAME" = "server" ] || [ "$PROBE_ROLE_NAME" = "both" ]; then
+    if [ -f /var/lib/chronosync/state ]; then
+      allow=$(read_backup_field /var/lib/chronosync/state allow)
+    fi
+    if [ -z "$allow" ] && [ "$PROBE_ROLE_ENGINE" = "chrony" ]; then
+      allow=$(extract_extra_allow chrony)
+    fi
+  fi
+  if [ -n "$PROBE_ROLE_ENGINE" ]; then
+    engine_out=$PROBE_ROLE_ENGINE
+  else
+    engine_out=none
+  fi
+  write_backup_manifest "$dest" "$PROBE_ROLE_NAME" "$engine_out" "$servers" "$allow" \
+    || die "Не удалось сохранить резервную копию: ${dest}"
+  log "Резервная копия настроек (${PROBE_ROLE_NAME}): ${dest}"
+  return 0
+}
+
+read_backup_field() {
+  local file key line val
+  file=$1
+  key=$2
+  val=
+  while IFS= read -r line; do
+    line=${line%%#*}
+    trim_line "$line"
+    line=$TRIMMED
+    case "$line" in
+      "${key}="*)
+        val=${line#${key}=}
+        ;;
+    esac
+  done < "$file"
+  printf '%s\n' "$val"
+}
+
+load_backup_file() {
+  local file
+  file=$1
+  if [ ! -f "$file" ] || [ ! -r "$file" ]; then
+    die "Файл резервной копии не найден или недоступен: ${file}"
+  fi
+  BACKUP_ROLE=$(read_backup_field "$file" role)
+  BACKUP_ENGINE=$(read_backup_field "$file" engine)
+  BACKUP_SERVERS=$(read_backup_field "$file" servers)
+  BACKUP_DEFAULT_UPSTREAM=$(read_backup_field "$file" default_upstream)
+  BACKUP_ALLOW=$(read_backup_field "$file" allow)
+  case "$BACKUP_ROLE" in
+    server|client|both|none)
+      ;;
+    *)
+      die "Некорректная роль в резервной копии: ${BACKUP_ROLE}"
+      ;;
+  esac
+  case "$BACKUP_ENGINE" in
+    chrony|ntp|timesyncd|none)
+      ;;
+    *)
+      die "Некорректный движок в резервной копии: ${BACKUP_ENGINE}"
+      ;;
+  esac
+  case "$BACKUP_DEFAULT_UPSTREAM" in
+    0|1)
+      ;;
+    *)
+      BACKUP_DEFAULT_UPSTREAM=0
+      ;;
+  esac
+  return 0
+}
+
+first_backup_server() {
+  local rest word
+  rest=$1
+  trim_line "$rest"
+  rest=$TRIMMED
+  if [ "$rest" = "-" ] || [ "$rest" = "default" ] || [ -z "$rest" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  word=${rest%%,*}
+  printf '%s\n' "$word"
+  return 0
+}
+
+build_chrony_both_conf() {
+  local rest word block
+  block=$(cat <<EOF
+# chronosync-managed
+# Сервер времени с синхронизацией от указанных источников.
+driftfile /var/lib/chrony/chrony.drift
+rtcsync
+makestep 1.0 3
+local stratum 8
+allow 10.0.0.0/8
+allow 172.16.0.0/12
+allow 192.168.0.0/16
+allow 169.254.0.0/16
+EOF
+)
+  if [ -n "$ALLOW" ]; then
+    block="${block}
+allow ${ALLOW}"
+  fi
+  rest=$1
+  while [ -n "$rest" ]; do
+    word=${rest%%,*}
+    if [ -n "$word" ]; then
+      block="${block}
+server ${word} iburst"
+    fi
+    case "$rest" in
+      *,*)
+        rest=${rest#*,}
+        ;;
+      *)
+        rest=
+        ;;
+    esac
+  done
+  printf '%s\n' "$block"
+}
+
+build_chrony_multi_client_conf() {
+  local rest word block
+  block=$(cat <<EOF
+# chronosync-managed
+# Клиент берёт время с указанных серверов.
+driftfile /var/lib/chrony/chrony.drift
+rtcsync
+makestep 1.0 -1
+EOF
+)
+  rest=$1
+  while [ -n "$rest" ]; do
+    word=${rest%%,*}
+    if [ -n "$word" ]; then
+      block="${block}
+server ${word} iburst"
+    fi
+    case "$rest" in
+      *,*)
+        rest=${rest#*,}
+        ;;
+      *)
+        rest=
+        ;;
+    esac
+  done
+  printf '%s\n' "$block"
+}
+
+build_timesyncd_multi_conf() {
+  local rest word ntp_line
+  ntp_line=
+  rest=$1
+  while [ -n "$rest" ]; do
+    word=${rest%%,*}
+    if [ -n "$word" ]; then
+      if [ -z "$ntp_line" ]; then
+        ntp_line=$word
+      else
+        ntp_line="${ntp_line} ${word}"
+      fi
+    fi
+    case "$rest" in
+      *,*)
+        rest=${rest#*,}
+        ;;
+      *)
+        rest=
+        ;;
+    esac
+  done
+  cat <<EOF
+[Time]
+NTP=${ntp_line}
+FallbackNTP=
+EOF
+}
+
+apply_restore_config() {
+  local role path content
+  role=$1
+  case "${ENGINE}:${role}" in
+    chrony:server)
+      path=$(chrony_conf_path) || return 1
+      content=$(build_chrony_server_conf) || return 1
+      ;;
+    chrony:client)
+      path=$(chrony_conf_path) || return 1
+      content=$(build_chrony_multi_client_conf "$BACKUP_SERVERS") || return 1
+      ;;
+    chrony:both)
+      path=$(chrony_conf_path) || return 1
+      content=$(build_chrony_both_conf "$BACKUP_SERVERS") || return 1
+      ;;
+    ntp:server)
+      path=$(ntp_conf_path) || return 1
+      content=$(build_ntp_server_conf) || return 1
+      ;;
+    ntp:client)
+      SERVER=$(first_backup_server "$BACKUP_SERVERS")
+      path=$(ntp_conf_path) || return 1
+      content=$(build_ntp_client_conf) || return 1
+      ;;
+    ntp:both)
+      SERVER=$(first_backup_server "$BACKUP_SERVERS")
+      path=$(ntp_conf_path) || return 1
+      content=$(build_ntp_server_conf) || return 1
+      ;;
+    timesyncd:client)
+      path=/etc/systemd/timesyncd.conf.d/chronosync.conf
+      content=$(build_timesyncd_multi_conf "$BACKUP_SERVERS") || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  write_text "$path" "$content" || return 1
+  log "Конфигурация восстановлена: ${path}"
+  return 0
+}
+
+restore_default_timesyncd() {
+  local path
+  path=/etc/systemd/timesyncd.conf.d/chronosync.conf
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[dry-run] rm -f %s\n' "$path"
+    printf '[dry-run] systemctl restart systemd-timesyncd\n'
+    printf '[dry-run] timedatectl set-ntp true\n'
+    return 0
+  fi
+  rm -f "$path" || true
+  enable_timesyncd || return 1
+  return 0
+}
+
+do_restore() {
+  local host ok_line
+  log "Режим: восстановление настроек из ${RESTORE_FILE}."
+  load_backup_file "$RESTORE_FILE" || die "Не удалось прочитать резервную копию."
+  ALLOW=$BACKUP_ALLOW
+  case "$BACKUP_ROLE" in
+    none)
+      disable_all_time_services || return 1
+      ENGINE=none
+      ACTION=set-time
+      write_state || die "Не удалось записать состояние."
+      print_ok "mode=restore role=none engine=none"
+      return 0
+      ;;
+    client)
+      if [ "$BACKUP_DEFAULT_UPSTREAM" = "1" ] || [ "$BACKUP_SERVERS" = "default" ]; then
+        ENGINE=timesyncd
+        disable_all_time_services || return 1
+        restore_default_timesyncd || die "Не удалось восстановить клиент systemd-timesyncd."
+        write_state || die "Не удалось записать состояние."
+        print_ok "mode=restore role=client engine=timesyncd server=default"
+        return 0
+      fi
+      host=$(first_backup_server "$BACKUP_SERVERS")
+      if [ -z "$host" ]; then
+        die "В резервной копии клиента не указаны серверы синхронизации."
+      fi
+      SERVER=$host
+      if [ -n "${CHRONOSYNC_ENGINE:-}" ]; then
+        ENGINE=$CHRONOSYNC_ENGINE
+      elif [ "$BACKUP_ENGINE" != "none" ]; then
+        ENGINE=$BACKUP_ENGINE
+      else
+        ENGINE=
+      fi
+      ensure_engine client || die "Не удалось подготовить службу времени."
+      disable_all_time_services || return 1
+      apply_restore_config client || die "Не удалось восстановить конфигурацию клиента."
+      prepare_dirs || die "Не удалось подготовить каталоги службы времени."
+      choose_unit || die "Не удалось выбрать службу времени."
+      if [ "$ENGINE" = "timesyncd" ]; then
+        if ! enable_timesyncd; then
+          show_time_debug "$UNIT"
+          die "Не удалось запустить systemd-timesyncd."
+        fi
+      else
+        if ! start_unit "$UNIT"; then
+          show_time_debug "$UNIT"
+          die "Не удалось запустить службу ${UNIT}."
+        fi
+      fi
+      if ! verify_client; then
+        show_time_debug "$UNIT"
+        die "Служба запущена, но синхронизация с ${SERVER} не подтверждена."
+      fi
+      sync_rtc || true
+      ACTION=sync-from
+      write_state || die "Не удалось записать состояние."
+      print_ok "mode=restore role=client engine=${ENGINE} server=${BACKUP_SERVERS}"
+      return 0
+      ;;
+    server)
+      if [ -n "${CHRONOSYNC_ENGINE:-}" ]; then
+        ENGINE=$CHRONOSYNC_ENGINE
+      elif [ "$BACKUP_ENGINE" != "none" ]; then
+        ENGINE=$BACKUP_ENGINE
+      else
+        ENGINE=
+      fi
+      ensure_engine server || die "Не удалось подготовить службу времени."
+      disable_all_time_services || return 1
+      sync_rtc || true
+      apply_restore_config server || die "Не удалось восстановить конфигурацию сервера."
+      prepare_dirs || die "Не удалось подготовить каталоги службы времени."
+      open_firewall || true
+      choose_unit || die "Не удалось выбрать службу времени."
+      if ! start_unit "$UNIT"; then
+        show_time_debug "$UNIT"
+        die "Не удалось запустить службу ${UNIT}."
+      fi
+      if ! verify_server; then
+        show_time_debug "$UNIT"
+        die "Служба ${UNIT} запущена, но сервер времени не отвечает."
+      fi
+      ACTION=time-server
+      write_state || die "Не удалось записать состояние."
+      print_ok "mode=restore role=server engine=${ENGINE}"
+      return 0
+      ;;
+    both)
+      if [ -n "${CHRONOSYNC_ENGINE:-}" ]; then
+        ENGINE=$CHRONOSYNC_ENGINE
+      elif [ "$BACKUP_ENGINE" != "none" ]; then
+        ENGINE=$BACKUP_ENGINE
+      else
+        ENGINE=
+      fi
+      ensure_engine server || die "Не удалось подготовить службу времени."
+      disable_all_time_services || return 1
+      sync_rtc || true
+      apply_restore_config both || die "Не удалось восстановить конфигурацию server+client."
+      prepare_dirs || die "Не удалось подготовить каталоги службы времени."
+      open_firewall || true
+      choose_unit || die "Не удалось выбрать службу времени."
+      if ! start_unit "$UNIT"; then
+        show_time_debug "$UNIT"
+        die "Не удалось запустить службу ${UNIT}."
+      fi
+      if ! verify_server; then
+        show_time_debug "$UNIT"
+        die "Служба ${UNIT} запущена, но сервер времени не отвечает."
+      fi
+      ACTION=time-server
+      write_state || die "Не удалось записать состояние."
+      print_ok "mode=restore role=both engine=${ENGINE} server=${BACKUP_SERVERS}"
+      return 0
+      ;;
+  esac
+  die "Не удалось восстановить настройки."
+}
+
+do_check() {
+  local epoch local_time utc_time server_yes client_yes svc sync_word role_name servers_csv engine_out label
+  epoch=$(date +%s)
+  local_time=$(date '+%Y-%m-%d %H:%M:%S %Z')
+  utc_time=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
+  log "Время устройства (локальное): ${local_time}"
+  log "Время устройства (UTC): ${utc_time}"
+  log "Unix-время: ${epoch}"
+
+  probe_device_role || die "Не удалось прочитать конфигурацию служб времени."
+  ROLE_ENGINE=$PROBE_ROLE_ENGINE
+  ROLE_STATE=$PROBE_ROLE_STATE
+  ROLE_SERVER=$PROBE_ROLE_SERVER
+  ROLE_UPSTREAMS=$PROBE_ROLE_UPSTREAMS
+  ROLE_DEFAULT_UPSTREAM=$PROBE_ROLE_DEFAULT_UPSTREAM
 
   if [ "$ROLE_SERVER" -eq 1 ]; then
     server_yes=да
@@ -1698,6 +2229,7 @@ do_check() {
 
 do_set_time() {
   log "Режим: установка времени с машины установщика."
+  maybe_backup_before_change || return 1
   disable_all_time_services || return 1
   set_clock || die "Не удалось установить время."
   ENGINE=none
@@ -1710,6 +2242,7 @@ do_set_time() {
 
 do_time_server() {
   log "Режим: сервер времени."
+  maybe_backup_before_change || return 1
   ensure_engine server || die "Не удалось подготовить службу времени."
   disable_all_time_services || return 1
   if [ -n "$NORM_SPEC" ]; then
@@ -1742,6 +2275,7 @@ do_time_server() {
 
 do_sync_from() {
   log "Режим: клиент сервера времени ${SERVER}."
+  maybe_backup_before_change || return 1
   ensure_engine client || die "Не удалось подготовить службу времени."
   disable_all_time_services || return 1
   apply_config client || die "Не удалось записать конфигурацию клиента."
@@ -1914,6 +2448,29 @@ NTP=1.1.1.1
 NTP=8.8.8.8"
   check_eq "parse ts last" "$ROLE_UPSTREAMS" "8.8.8.8"
 
+  conf=$(build_chrony_multi_client_conf "192.168.0.10,10.0.0.5")
+  if printf '%s\n' "$conf" | grep -q '^server 192.168.0.10 iburst' \
+      && printf '%s\n' "$conf" | grep -q '^server 10.0.0.5 iburst'; then
+    printf 'ok %s\n' "multi client"
+  else
+    printf 'FAIL multi client\n' >&2
+    FAILS=$((FAILS + 1))
+  fi
+
+  PARSE_TMP="/tmp/chronosync-selftest-backup.$$"
+  printf '%s\n' "# chronosync-backup v1
+role=client
+engine=chrony
+servers=192.168.0.10,10.0.0.5
+default_upstream=0
+allow=
+service_state=active" > "$PARSE_TMP"
+  BACKUP_ROLE=$(read_backup_field "$PARSE_TMP" role)
+  BACKUP_SERVERS=$(read_backup_field "$PARSE_TMP" servers)
+  check_eq "backup role" "$BACKUP_ROLE" "client"
+  check_eq "backup servers" "$BACKUP_SERVERS" "192.168.0.10,10.0.0.5"
+  rm -f "$PARSE_TMP"
+
   if [ "$FAILS" -ne 0 ]; then
     printf 'self-test: FAIL %s\n' "$FAILS" >&2
     exit 1
@@ -1953,6 +2510,9 @@ main() {
       ;;
     check)
       do_check
+      ;;
+    restore)
+      do_restore
       ;;
     *)
       die "Неизвестный режим."

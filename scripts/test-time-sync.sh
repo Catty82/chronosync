@@ -77,6 +77,8 @@ fi
 run_case "help" 0 dash "$SCRIPT" --help
 assert_contains "help sync-from" "sync-from"
 assert_contains "help check" "check"
+assert_contains "help restore" "restore"
+assert_contains "help backup" "--backup"
 assert_not_contains "help ok" "CHRONOSYNC_OK"
 
 run_case "no args" 1 dash "$SCRIPT"
@@ -92,7 +94,15 @@ run_case "ipv6" 1 dash "$SCRIPT" --dry-run sync-from "2001:db8::1"
 assert_contains "ipv6 msg" "IPv6"
 run_case "flag host" 1 dash "$SCRIPT" --dry-run sync-from -- -rf
 run_case "allow on set" 1 dash "$SCRIPT" --dry-run set-time --allow 10.1.0.0/16 1761307080
+run_case "backup on check" 1 dash "$SCRIPT" --dry-run check --backup /tmp/chronosync-backup-test
+run_case "restore no file" 1 dash "$SCRIPT" --dry-run restore
 run_case "two hosts" 1 dash "$SCRIPT" --dry-run sync-from 192.168.0.10 extra
+
+BACKUP_ROOT="/tmp/chronosync-backup-$$"
+run_case "dry backup set" 0 dash "$SCRIPT" --dry-run --backup "$BACKUP_ROOT" set-time 1761307080
+assert_contains "backup set msg" "Резервная копия настроек"
+assert_contains "backup set ok" "CHRONOSYNC_OK mode=set-time"
+rm -rf "$BACKUP_ROOT" || true
 
 before=$(date +%s)
 run_case "dry set epoch" 0 dash "$SCRIPT" --dry-run set-time 1761307080
