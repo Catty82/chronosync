@@ -120,6 +120,7 @@ fi
 assert_contains "dry set date" "[dry-run] date -s @1761307080"
 assert_contains "dry set ok" "CHRONOSYNC_OK mode=set-time"
 assert_contains "dry set ntp off" "Time synchronization services are off"
+assert_contains "dry set clients" "Clients keep the previous time"
 
 run_case "dry set wall" 0 dash "$SCRIPT" --dry-run set-time 2026-10-24 14:18:00+05:00
 assert_contains "wall spec" "[dry-run] date -s 2026-10-24 14:18:00+05:00"
@@ -166,6 +167,7 @@ assert_contains "alias server" "server time-server.lan iburst"
 run_case "dry ntp client" 0 env CHRONOSYNC_ENGINE=ntp dash "$SCRIPT" --dry-run sync-from 10.1.2.3
 assert_contains "ntp client restrict" "restrict -4 10.1.2.3 nomodify notrap noquery"
 assert_contains "ntp client server" "server 10.1.2.3 iburst"
+assert_contains "ntp client step" "step 0.128 0"
 
 run_case "dry timesyncd client" 0 env CHRONOSYNC_ENGINE=timesyncd dash "$SCRIPT" --dry-run sync-from 192.168.1.5
 assert_contains "timesyncd ntp" "NTP=192.168.1.5"

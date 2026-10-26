@@ -937,6 +937,7 @@ build_ntp_client_conf() {
 # The client follows only the configured server.
 driftfile ${drift}
 tinker panic 0
+step 0.128 0
 restrict -4 default ignore
 restrict -4 127.0.0.1
 restrict -6 default ignore
@@ -2285,8 +2286,9 @@ do_set_time() {
   ENGINE=none
   write_state || die "Could not write state."
   log "Time synchronization services are off so they do not overwrite the clock."
-  log "To make this device a server, run: time-sync.sh time-server"
-  log "Or point it at a server: time-sync.sh sync-from <ip>"
+  log "Clients keep the previous time until this device serves again."
+  log "To publish this time, run: time-sync.sh time-server"
+  log "Or point this device at a server: time-sync.sh sync-from <ip>"
   print_ok "mode=set-time"
 }
 
