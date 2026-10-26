@@ -1,40 +1,40 @@
 #!/bin/sh
-# Синхронизация времени для устройств установщика.
+# Time synchronization for installer devices.
 #
-# Платформы: NanoPi H3, NanoPi H5, RK3588, x86_64.
-# ОС: Ubuntu 18.04, Ubuntu 22.04, Astra Linux 1.8 и другие Debian-совместимые
-# сборки (в том числе Astra Linux 4.8), со systemd.
+# Platforms: NanoPi H3, NanoPi H5, RK3588, x86_64.
+# OS: Ubuntu 18.04, Ubuntu 22.04, Astra Linux 1.8, and other Debian-compatible
+# systems (including Astra Linux 4.8) with systemd.
 #
-# Скрипт запускается уже на устройстве. Логин, пароль и IP — это параметры
-# SSH в установщике, сюда их передавать не нужно.
+# The script runs on the device. Login, password, and IP are SSH parameters
+# of the installer and are not passed here.
 #
-# Время передавайте Unix-секундами с машины, где работает установщик
-# (Qt: QDateTime::currentSecsSinceEpoch()), сразу перед вызовом.
-# Так часовой пояс устройства не влияет на абсолютное время.
+# Pass time as Unix seconds from the machine running the installer
+# (Qt: QDateTime::currentSecsSinceEpoch()), immediately before the call.
+# The device time zone then does not affect the absolute time.
 #
-#   time-sync.sh set-time <время> [--backup <каталог>]
-#   time-sync.sh time-server [время] [--allow a.b.c.d/nn] [--backup <каталог>]
-#   time-sync.sh sync-from <ip-сервера-времени> [--backup <каталог>]
-#   time-sync.sh restore <файл-сохранённых-настроек>
+#   time-sync.sh set-time <time> [--backup <directory>]
+#   time-sync.sh time-server [time] [--allow a.b.c.d/nn] [--backup <directory>]
+#   time-sync.sh sync-from <time-server-ip> [--backup <directory>]
+#   time-sync.sh restore <saved-settings-file>
 #   time-sync.sh check
 #
-# Примеры:
+# Examples:
 #   time-sync.sh set-time 1761307080
 #   time-sync.sh time-server 1761307080
 #   time-sync.sh sync-from 192.168.0.10
 #   time-sync.sh --backup /var/lib/chronosync/backups set-time 1761307080
 #   time-sync.sh restore /var/lib/chronosync/backups/client
 #
-# set-time только выставляет часы и выключает NTP.
-# time-server выставляет часы (если время передано) и раздаёт их по udp/123
-# в частные сети. В интернет сервер не ходит: источником является выставленное время.
-# sync-from настраивает устройство брать время только с указанного сервера.
+# set-time only sets the clock and turns NTP off.
+# time-server sets the clock (when a time is given) and serves it on udp/123
+# to private networks. The server does not use the Internet: the source is the set time.
+# sync-from makes the device follow only the given server.
 #
-# Предпочтительно ставится chrony. Если пакета нет в репозитории — ntp.
-# Если установить их нельзя, клиент может остаться на systemd-timesyncd.
-# Серверу нужен chrony или ntp.
+# chrony is preferred. If that package is missing from the repository, ntp is used.
+# If neither can be installed, a client may stay on systemd-timesyncd.
+# A server needs chrony or ntp.
 #
-# Переводы строк файла — только LF.
+# File line endings must be LF only.
 
 set -eu
 umask 022
@@ -91,52 +91,52 @@ log() {
 }
 
 die() {
-  printf 'Ошибка: %s\n' "$*" >&2
+  printf 'Error: %s\n' "$*" >&2
   exit 1
 }
 
 usage() {
   cat <<'EOF'
-Использование:
-  time-sync.sh set-time <время>
-  time-sync.sh time-server [время] [--allow a.b.c.d/nn]
-  time-sync.sh sync-from <адрес-сервера-времени> [--backup <каталог>]
-  time-sync.sh restore <файл-сохранённых-настроек>
+Usage:
+  time-sync.sh set-time <time>
+  time-sync.sh time-server [time] [--allow a.b.c.d/nn]
+  time-sync.sh sync-from <time-server-address> [--backup <directory>]
+  time-sync.sh restore <saved-settings-file>
   time-sync.sh check
-  time-sync.sh --dry-run <режим> [аргументы]
+  time-sync.sh --dry-run <mode> [arguments]
   time-sync.sh self-test
 
-Время:
-  1761307080                         Unix-секунды, предпочтительно
-  2026-10-24 14:18:00+05:00          абсолютное время со смещением
-  2026-10-24 14:18:00Z               время UTC
-  2026-10-24 14:18:00                локальное время устройства
-  24.10.2026 14:18:00                локальное время устройства
+Time:
+  1761307080                         Unix seconds, preferred
+  2026-10-24 14:18:00+05:00          absolute time with a numeric offset
+  2026-10-24 14:18:00Z               UTC
+  2026-10-24 14:18:00                device local time
+  24.10.2026 14:18:00                device local time
 
-Режимы:
-  set-time      выставить время и выключить синхронизацию
-  time-server   сделать это устройство сервером времени (udp/123)
-  sync-from     брать время с сервера, настроенного как time-server
-  check         показать время, роль сервера и адрес внешнего сервера
-  restore       восстановить настройки из файла, сохранённого через --backup
+Modes:
+  set-time      set the clock and turn synchronization off
+  time-server   make this device a time server (udp/123)
+  sync-from     follow a server configured with time-server
+  check         show the time, server role, and upstream server address
+  restore       restore settings from a file saved with --backup
 
-Дополнительные имена режимов: set, server, client, check, restore, время, сервер, клиент, проверка, восстановление.
+Also accepted: set, server, client, check, restore, время, сервер, клиент, проверка, восстановление.
 
---backup <каталог> перед set-time, time-server или sync-from сохраняет текущие настройки
-в каталоге файлом server, client, both или none (по текущей роли), затем применяет новый режим.
+--backup <directory> saves the current settings before set-time, time-server, or sync-from.
+The file is named server, client, both, or none (the current role). The new mode is applied after that.
 
-Логин, пароль и IP подключения скрипт не принимает: их использует SSH установщика.
-Пароль в аргументы не передавайте.
+The script does not take the SSH login, password, or address. The installer uses those.
+Do not pass a password as an argument.
 
---allow добавляет одну сеть к частным диапазонам, которым сервер отдаёт время.
-То же самое делает переменная CHRONOSYNC_ALLOW=a.b.c.d/nn.
-CHRONOSYNC_ENGINE=chrony|ntp|timesyncd принудительно выбирает службу.
+--allow adds one network to the private ranges the server answers.
+CHRONOSYNC_ALLOW=a.b.c.d/nn does the same.
+CHRONOSYNC_ENGINE=chrony|ntp|timesyncd forces the service.
 EOF
 }
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
-    die "Не найдена команда: $1"
+    die "Command not found: $1"
   fi
 }
 
@@ -156,14 +156,14 @@ parse_args() {
         ;;
       --backup)
         if [ $# -lt 2 ]; then
-          die "--backup требует каталог для сохранения настроек"
+          die "--backup requires a directory for the saved settings"
         fi
         BACKUP_DIR=$2
         shift 2
         ;;
       --allow)
         if [ $# -lt 2 ]; then
-          die "--allow требует сеть в виде a.b.c.d/nn"
+          die "--allow requires a network as a.b.c.d/nn"
         fi
         ALLOW=$2
         ALLOW_FLAG=1
@@ -178,7 +178,7 @@ parse_args() {
         break
         ;;
       -*)
-        die "Неизвестный параметр: $1"
+        die "Unknown option: $1"
         ;;
       *)
         if [ -z "$ACTION" ]; then
@@ -227,7 +227,7 @@ parse_args() {
       exit 1
       ;;
     *)
-      die "Неизвестный режим: ${ACTION}. Допустимо: set-time, time-server, sync-from, check."
+      die "Unknown mode: ${ACTION}. Expected set-time, time-server, sync-from, check, or restore."
       ;;
   esac
 
@@ -236,7 +236,7 @@ parse_args() {
   fi
   if [ "$ACTION" != "time-server" ]; then
     if [ "$ALLOW_FLAG" -eq 1 ]; then
-      die "--allow используется только вместе с time-server"
+      die "--allow is only valid with time-server"
     fi
     ALLOW=
   fi
@@ -245,7 +245,7 @@ parse_args() {
       ;;
     *)
       if [ -n "$BACKUP_DIR" ]; then
-        die "--backup используется только с set-time, time-server или sync-from"
+        die "--backup is only valid with set-time, time-server, or sync-from"
       fi
       ;;
   esac
@@ -415,54 +415,54 @@ validate_args() {
   case "$ACTION" in
     set-time)
       if [ -z "$REST" ]; then
-        die "Укажите время: time-sync.sh set-time <время>"
+        die "Specify a time: time-sync.sh set-time <time>"
       fi
       if ! prepare_time "$REST"; then
-        die "Некорректное время: ${REST}. Ожидаются Unix-секунды или дата ГГГГ-ММ-ДД ЧЧ:ММ:СС."
+        die "Invalid time: ${REST}. Expected Unix seconds or a date YYYY-MM-DD HH:MM:SS."
       fi
       ;;
     time-server)
       if [ -n "$REST" ]; then
         if ! prepare_time "$REST"; then
-          die "Некорректное время: ${REST}. Ожидаются Unix-секунды или дата ГГГГ-ММ-ДД ЧЧ:ММ:СС."
+          die "Invalid time: ${REST}. Expected Unix seconds or a date YYYY-MM-DD HH:MM:SS."
         fi
       else
         NORM_KIND=
         NORM_SPEC=
       fi
       if [ -n "$ALLOW" ] && ! valid_cidr "$ALLOW"; then
-        die "Некорректная сеть для --allow: ${ALLOW} (ожидается a.b.c.d/nn)"
+        die "Invalid network for --allow: ${ALLOW} (expected a.b.c.d/nn)"
       fi
       ;;
     sync-from)
       if [ -z "$REST" ]; then
-        die "Укажите адрес сервера: time-sync.sh sync-from <ip>"
+        die "Specify a server address: time-sync.sh sync-from <ip>"
       fi
       case "$REST" in
         *" "*)
-          die "Адрес сервера времени — один аргумент, без пробелов."
+          die "The time server address must be a single argument, with no spaces."
           ;;
         *:*)
-          die "Нужен IPv4-адрес или DNS-имя. IPv6 не поддерживается: ${REST}"
+          die "An IPv4 address or DNS name is required. IPv6 is not supported: ${REST}"
           ;;
       esac
       if ! valid_host "$REST"; then
-        die "Некорректный адрес сервера времени: ${REST}"
+        die "Invalid time server address: ${REST}"
       fi
       SERVER=$REST
       ;;
     check)
       if [ -n "$REST" ]; then
-        die "Режим check не принимает дополнительные аргументы."
+        die "check does not take extra arguments."
       fi
       ;;
     restore)
       if [ -z "$REST" ]; then
-        die "Укажите файл: time-sync.sh restore <файл-сохранённых-настроек>"
+        die "Specify a file: time-sync.sh restore <saved-settings-file>"
       fi
       case "$REST" in
         *" "*)
-          die "Путь к файлу резервной копии — один аргумент, без пробелов."
+          die "The backup file path must be a single argument, with no spaces."
           ;;
       esac
       RESTORE_FILE=$REST
@@ -485,12 +485,12 @@ elevate() {
     return 0
   fi
   if [ "${CHRONOSYNC_NO_SUDO:-0}" = "1" ]; then
-    die "Нужны права root."
+    die "Root is required."
   fi
   if command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
     exec sudo -n -E -- "$0" "$@"
   fi
-  die "Нужны права root. Подключайтесь по SSH пользователем root или настройте sudo без пароля."
+  die "Root is required. Connect over SSH as root, or configure passwordless sudo."
 }
 
 have_chrony() {
@@ -565,12 +565,12 @@ install_pkg() {
   export DEBIAN_FRONTEND=noninteractive
   begin_policy || true
   apt_log="/tmp/chronosync-apt.${pkg}.$$.log"
-  log "Пробую установить пакет ${pkg}..."
+  log "Trying to install package ${pkg}..."
   if ! run_timeout 120 apt-get update -y \
       -o Acquire::Retries=1 \
       -o Acquire::http::Timeout=15 \
       -o Acquire::https::Timeout=15 >"$apt_log" 2>&1; then
-    log "Предупреждение: apt-get update не выполнен."
+    log "Warning: apt-get update failed."
     if [ -f "$apt_log" ]; then
       tail -n 20 "$apt_log" || true
     fi
@@ -579,7 +579,7 @@ install_pkg() {
       -o Dpkg::Options::=--force-confdef \
       -o Dpkg::Options::=--force-confold \
       "$pkg" >"$apt_log" 2>&1; then
-    log "Не удалось установить пакет ${pkg}."
+    log "Failed to install package ${pkg}."
     if [ -f "$apt_log" ]; then
       tail -n 30 "$apt_log" || true
     fi
@@ -590,7 +590,7 @@ install_pkg() {
   rm -f "$apt_log" || true
   end_policy
   hash -r 2>/dev/null || true
-  log "Пакет ${pkg} установлен."
+  log "Package ${pkg} installed."
   return 0
 }
 
@@ -603,7 +603,7 @@ ensure_engine() {
         ENGINE=$CHRONOSYNC_ENGINE
         ;;
       *)
-        die "CHRONOSYNC_ENGINE должен быть chrony, ntp или timesyncd"
+        die "CHRONOSYNC_ENGINE must be chrony, ntp, or timesyncd"
         ;;
     esac
     if [ "$ENGINE" = "ntp" ]; then
@@ -613,19 +613,19 @@ ensure_engine() {
       case "$ENGINE" in
         chrony)
           if ! have_chrony; then
-            install_pkg chrony || die "Не удалось установить chrony."
-            have_chrony || die "Пакет chrony установлен, но chronyd не найден в PATH."
+            install_pkg chrony || die "Failed to install chrony."
+            have_chrony || die "The chrony package is installed, but chronyd is not in PATH."
           fi
           ;;
         ntp)
           if ! have_ntp; then
-            install_pkg ntp || install_pkg ntpsec || die "Не удалось установить ntp."
-            have_ntp || die "Пакет ntp установлен, но ntpd не найден в PATH."
+            install_pkg ntp || install_pkg ntpsec || die "Failed to install ntp."
+            have_ntp || die "The ntp package is installed, but ntpd is not in PATH."
             detect_ntp_variant
           fi
           ;;
         timesyncd)
-          have_timesyncd || die "systemd-timesyncd не установлен."
+          have_timesyncd || die "systemd-timesyncd is not installed."
           ;;
       esac
     fi
@@ -636,7 +636,7 @@ ensure_engine() {
     detect_ntp_variant
   elif [ "$DRY_RUN" -eq 1 ]; then
     ENGINE=chrony
-    log "[dry-run] chrony и ntp не найдены, был бы установлен пакет chrony"
+    log "[dry-run] chrony and ntp were not found; the chrony package would be installed"
   elif install_pkg chrony && have_chrony; then
     ENGINE=chrony
   elif install_pkg ntp && have_ntp; then
@@ -647,15 +647,15 @@ ensure_engine() {
     detect_ntp_variant
   elif [ "$purpose" = "client" ] && have_timesyncd; then
     ENGINE=timesyncd
-    log "Пакеты chrony и ntp недоступны. Используется systemd-timesyncd (только клиент)."
+    log "The chrony and ntp packages are unavailable. Using systemd-timesyncd (client only)."
   else
-    die "Не найден chrony или ntp, и установить пакет не удалось. На устройстве без интернета поставьте пакет chrony из локального репозитория и повторите."
+    die "chrony or ntp was not found, and the package could not be installed. On a device without Internet, install chrony from a local repository and retry."
   fi
 
   if [ "$purpose" = "server" ] && [ "$ENGINE" = "timesyncd" ]; then
-    die "systemd-timesyncd не может быть сервером времени. Установите пакет chrony или ntp."
+    die "systemd-timesyncd cannot be a time server. Install chrony or ntp."
   fi
-  log "Движок: ${ENGINE}"
+  log "Engine: ${ENGINE}"
   return 0
 }
 
@@ -733,7 +733,7 @@ disable_all_time_services() {
   done
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '[dry-run] timedatectl set-ntp false\n'
-    printf '[dry-run] остановить chronyd и ntpd, если они ещё запущены\n'
+    printf '[dry-run] stop chronyd and ntpd if they are still running\n'
     return 0
   fi
   if command -v timedatectl >/dev/null 2>&1; then
@@ -804,13 +804,13 @@ sync_rtc() {
     timedatectl set-local-rtc 0 >/dev/null 2>&1 || true
   fi
   if ! command -v hwclock >/dev/null 2>&1; then
-    log "Предупреждение: hwclock не найден, аппаратные часы не обновлены."
+    log "Warning: hwclock was not found; the hardware clock was not updated."
     return 0
   fi
   if hwclock --systohc >/dev/null 2>&1; then
-    log "Аппаратные часы (RTC) обновлены."
+    log "Hardware clock (RTC) updated."
   else
-    log "Предупреждение: не удалось записать RTC. Системное время установлено."
+    log "Warning: failed to write the RTC. The system clock was set."
   fi
   sync >/dev/null 2>&1 || true
   return 0
@@ -826,8 +826,8 @@ set_clock() {
     if ! date -s "$NORM_SPEC"; then
       return 1
     fi
-    log "Время устройства (локальное): $(date '+%Y-%m-%d %H:%M:%S %Z')"
-    log "Время устройства (UTC): $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+    log "Device time (local): $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    log "Device time (UTC): $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
   fi
   sync_rtc || return 1
   return 0
@@ -869,8 +869,8 @@ build_chrony_server_conf() {
   local base
   base=$(cat <<EOF
 # chronosync-managed
-# Локальный сервер времени. Внешние NTP-серверы не используются.
-# local stratum заставляет chrony раздавать время без внешнего источника.
+# Local time server. External NTP servers are not used.
+# local stratum makes chrony serve time without an external source.
 driftfile /var/lib/chrony/chrony.drift
 rtcsync
 makestep 1.0 3
@@ -891,7 +891,7 @@ allow ${ALLOW}"
 build_chrony_client_conf() {
   cat <<EOF
 # chronosync-managed
-# Клиент берёт время только с указанного сервера.
+# The client follows only the configured server.
 driftfile /var/lib/chrony/chrony.drift
 rtcsync
 makestep 1.0 -1
@@ -904,7 +904,7 @@ build_ntp_server_conf() {
   drift=$(ntp_drift_path)
   base=$(cat <<EOF
 # chronosync-managed
-# Локальный сервер времени. Внешние NTP-серверы не используются.
+# Local time server. External NTP servers are not used.
 driftfile ${drift}
 tinker panic 0
 restrict -4 default ignore
@@ -934,7 +934,7 @@ build_ntp_client_conf() {
   drift=$(ntp_drift_path)
   cat <<EOF
 # chronosync-managed
-# Клиент берёт время только с указанного сервера.
+# The client follows only the configured server.
 driftfile ${drift}
 tinker panic 0
 restrict -4 default ignore
@@ -959,7 +959,7 @@ write_text() {
   dest=$1
   content=$2
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[dry-run] запись %s\n' "$dest"
+    printf '[dry-run] write %s\n' "$dest"
     printf '%s\n' "$content"
     return 0
   fi
@@ -1009,7 +1009,7 @@ apply_config() {
       ;;
   esac
   write_text "$path" "$content" || return 1
-  log "Конфигурация: ${path}"
+  log "Configuration: ${path}"
   return 0
 }
 
@@ -1056,7 +1056,7 @@ allow=${ALLOW}
 EOF
 )
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[dry-run] запись /var/lib/chronosync/state\n'
+    printf '[dry-run] write /var/lib/chronosync/state\n'
     printf '%s\n' "$content"
     return 0
   fi
@@ -1078,7 +1078,7 @@ open_firewall() {
   handled=0
   policy=
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[dry-run] открыть входящий udp/123, если фаервол это блокирует\n'
+    printf '[dry-run] open inbound udp/123 if a firewall blocks it\n'
     return 0
   fi
   if [ -f /etc/ufw/ufw.conf ] && grep -Eq '^ENABLED=yes' /etc/ufw/ufw.conf; then
@@ -1086,14 +1086,14 @@ open_firewall() {
       ufw allow 123/udp >/dev/null 2>&1 || true
       ufw allow out 123/udp >/dev/null 2>&1 || true
       handled=1
-      log "Фаервол: ufw разрешает udp/123."
+      log "Firewall: ufw allows udp/123."
     fi
   fi
   if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
     firewall-cmd --add-port=123/udp --permanent >/dev/null 2>&1 || true
     firewall-cmd --reload >/dev/null 2>&1 || true
     handled=1
-    log "Фаервол: firewalld разрешает udp/123."
+    log "Firewall: firewalld allows udp/123."
   fi
   if [ "$handled" -eq 0 ] && command -v iptables >/dev/null 2>&1; then
     policy=$(iptables -S INPUT 2>/dev/null | head -n 1 || true)
@@ -1103,20 +1103,20 @@ open_firewall() {
           iptables -I INPUT -p udp --dport 123 -j ACCEPT >/dev/null 2>&1 || true
         fi
         if command -v netfilter-persistent >/dev/null 2>&1; then
-          netfilter-persistent save >/dev/null 2>&1 || log "Предупреждение: правило udp/123 добавлено, но не сохранено."
+          netfilter-persistent save >/dev/null 2>&1 || log "Warning: the udp/123 rule was added but not saved."
         elif [ -d /etc/iptables ] && command -v iptables-save >/dev/null 2>&1; then
-          iptables-save > /etc/iptables/rules.v4 2>/dev/null || log "Предупреждение: правило udp/123 действует только до перезагрузки."
+          iptables-save > /etc/iptables/rules.v4 2>/dev/null || log "Warning: the udp/123 rule lasts only until reboot."
         else
-          log "Предупреждение: правило udp/123 добавлено в iptables только до перезагрузки."
+          log "Warning: the iptables udp/123 rule lasts only until reboot."
         fi
-        log "Фаервол: iptables разрешает входящий udp/123."
+        log "Firewall: iptables allows inbound udp/123."
         ;;
       *)
-        log "Входящий фильтр не запрещает соединения, отдельное правило udp/123 не нужно."
+        log "The inbound filter does not block connections, so a separate udp/123 rule is not needed."
         ;;
     esac
   elif [ "$handled" -eq 0 ]; then
-    log "Фаервол не обнаружен, отдельное правило udp/123 не добавлялось."
+    log "No firewall was found, so no extra udp/123 rule was added."
   fi
   return 0
 }
@@ -1126,7 +1126,44 @@ chrony_csv_synced() {
 }
 
 chrony_tracking_ok() {
-  printf '%s\n' "$1" | awk -F, 'NF >= 2 { stratum = $2 + 0; leap = $NF; if (leap == "Normal" && stratum >= 1 && stratum <= 15) found = 1 } END { exit (found ? 0 : 1) }'
+  # chrony 4.x CSV ends with the leap word "Normal".
+  # chrony 3.x (for example 3.5) prints that leap code as 0.
+  # Human-readable "chronyc tracking" uses "Leap status : Normal" on both.
+  printf '%s\n' "$1" | awk '
+    function trim(v) {
+      gsub(/^[ \t\r]+|[ \t\r]+$/, "", v)
+      return v
+    }
+    function leap_ok(v) {
+      v = trim(v)
+      return v == "Normal" || v == "normal" || v == "0"
+    }
+    function known_leap(v) {
+      v = trim(v)
+      return v == "Normal" || v == "normal" || v == "0" || v == "1" || v == "2" || v == "3" ||
+        v == "Not synchronised" || v == "Insert second" || v == "Delete second"
+    }
+    BEGIN { found = 0; stratum = -1; leap_good = 0 }
+    /^Stratum[[:space:]]*:/ { stratum = $NF + 0 }
+    /^Leap status[[:space:]]*:/ { if (leap_ok($NF)) leap_good = 1 }
+    index($0, ",") > 0 {
+      n = split($0, f, ",")
+      if (n >= 2) {
+        csv_stratum = f[2] + 0
+        leap = f[n]
+        if (!leap_ok(leap) && n > 2 && !known_leap(leap)) leap = f[n - 1]
+        if (csv_stratum >= 1 && csv_stratum <= 15 && leap_ok(leap)) found = 1
+      }
+    }
+    END {
+      if (stratum >= 1 && stratum <= 15 && leap_good) found = 1
+      exit (found ? 0 : 1)
+    }
+  '
+}
+
+chrony_local_reference() {
+  printf '%s\n' "$1" | grep -E -q '7F7F0101|127\.127\.1\.1'
 }
 
 chrony_client_synced() {
@@ -1139,28 +1176,34 @@ chrony_client_synced() {
 }
 
 chrony_server_ready() {
-  local tracking
-  tracking=$(LC_ALL=C chronyc -c tracking 2>/dev/null || true)
+  local tracking csv
+  tracking=$(LC_ALL=C chronyc tracking 2>/dev/null || true)
   if chrony_tracking_ok "$tracking"; then
+    return 0
+  fi
+  csv=$(LC_ALL=C chronyc -c tracking 2>/dev/null || true)
+  if chrony_tracking_ok "$csv"; then
     return 0
   fi
   return 1
 }
 
 ntp_port_open() {
+  local dump
+  dump=
   if command -v ss >/dev/null 2>&1; then
-    if LC_ALL=C ss -uln | grep -E ':123([[:space:]]|$)' >/dev/null 2>&1; then
-      return 0
-    fi
-    return 1
+    dump=$(LC_ALL=C ss -uln 2>/dev/null || true)
+    dump="${dump}
+$(LC_ALL=C ss -ul 2>/dev/null || true)"
+  elif command -v netstat >/dev/null 2>&1; then
+    dump=$(LC_ALL=C netstat -uln 2>/dev/null || true)
+  else
+    return 0
   fi
-  if command -v netstat >/dev/null 2>&1; then
-    if LC_ALL=C netstat -uln | grep -E ':123([[:space:]]|$)' >/dev/null 2>&1; then
-      return 0
-    fi
-    return 1
+  if printf '%s\n' "$dump" | grep -E -q ':123([[:space:]]|$)|:ntp([[:space:]]|$)'; then
+    return 0
   fi
-  return 0
+  return 1
 }
 
 ntp_query() {
@@ -1212,17 +1255,24 @@ timesyncd_synced() {
 }
 
 verify_server() {
-  local i
+  local i tracking
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[dry-run] проверка, что сервер времени отвечает\n'
+    printf '[dry-run] check that the time server answers\n'
     return 0
   fi
   i=0
   while [ "$i" -lt 45 ]; do
     case "$ENGINE" in
       chrony)
-        if chrony_server_ready && ntp_port_open; then
-          return 0
+        if chrony_server_ready; then
+          if ntp_port_open; then
+            return 0
+          fi
+          tracking=$(LC_ALL=C chronyc tracking 2>/dev/null || true)
+          if chrony_local_reference "$tracking"; then
+            log "Warning: udp/123 was not listed by ss or netstat, but chrony is serving its local clock."
+            return 0
+          fi
         fi
         ;;
       ntp)
@@ -1240,7 +1290,7 @@ verify_server() {
 verify_client() {
   local i limit
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '[dry-run] проверка синхронизации с %s\n' "$SERVER"
+    printf '[dry-run] check synchronization with %s\n' "$SERVER"
     return 0
   fi
   if [ "$ENGINE" = "ntp" ]; then
@@ -1331,7 +1381,7 @@ print_addresses() {
   if [ -n "$addrs" ]; then
     printf '%s\n' "$addrs"
   else
-    log "Не удалось определить IPv4-адреса устройства."
+    log "Could not determine the device IPv4 addresses."
   fi
   return 0
 }
@@ -1757,12 +1807,12 @@ maybe_backup_before_change() {
     return 0
   fi
   if ! probe_device_role; then
-    die "Не удалось определить текущие настройки времени для резервной копии."
+    die "Could not read the current time settings for the backup."
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '[dry-run] mkdir -p %s\n' "$BACKUP_DIR"
   else
-    mkdir -p "$BACKUP_DIR" || die "Не удалось создать каталог резервной копии: ${BACKUP_DIR}"
+    mkdir -p "$BACKUP_DIR" || die "Could not create the backup directory: ${BACKUP_DIR}"
   fi
   dest="${BACKUP_DIR}/${PROBE_ROLE_NAME}"
   servers=$(backup_servers_csv)
@@ -1781,8 +1831,8 @@ maybe_backup_before_change() {
     engine_out=none
   fi
   write_backup_manifest "$dest" "$PROBE_ROLE_NAME" "$engine_out" "$servers" "$allow" \
-    || die "Не удалось сохранить резервную копию: ${dest}"
-  log "Резервная копия настроек (${PROBE_ROLE_NAME}): ${dest}"
+    || die "Could not save the backup: ${dest}"
+  log "Saved time settings (${PROBE_ROLE_NAME}): ${dest}"
   return 0
 }
 
@@ -1808,7 +1858,7 @@ load_backup_file() {
   local file
   file=$1
   if [ ! -f "$file" ] || [ ! -r "$file" ]; then
-    die "Файл резервной копии не найден или недоступен: ${file}"
+    die "Backup file not found or not readable: ${file}"
   fi
   BACKUP_ROLE=$(read_backup_field "$file" role)
   BACKUP_ENGINE=$(read_backup_field "$file" engine)
@@ -1819,14 +1869,14 @@ load_backup_file() {
     server|client|both|none)
       ;;
     *)
-      die "Некорректная роль в резервной копии: ${BACKUP_ROLE}"
+      die "Invalid role in the backup: ${BACKUP_ROLE}"
       ;;
   esac
   case "$BACKUP_ENGINE" in
     chrony|ntp|timesyncd|none)
       ;;
     *)
-      die "Некорректный движок в резервной копии: ${BACKUP_ENGINE}"
+      die "Invalid engine in the backup: ${BACKUP_ENGINE}"
       ;;
   esac
   case "$BACKUP_DEFAULT_UPSTREAM" in
@@ -1857,7 +1907,7 @@ build_chrony_both_conf() {
   local rest word block
   block=$(cat <<EOF
 # chronosync-managed
-# Сервер времени с синхронизацией от указанных источников.
+# Time server that also synchronizes from the listed sources.
 driftfile /var/lib/chrony/chrony.drift
 rtcsync
 makestep 1.0 3
@@ -1895,7 +1945,7 @@ build_chrony_multi_client_conf() {
   local rest word block
   block=$(cat <<EOF
 # chronosync-managed
-# Клиент берёт время с указанных серверов.
+# The client follows the listed servers.
 driftfile /var/lib/chrony/chrony.drift
 rtcsync
 makestep 1.0 -1
@@ -1988,7 +2038,7 @@ apply_restore_config() {
       ;;
   esac
   write_text "$path" "$content" || return 1
-  log "Конфигурация восстановлена: ${path}"
+  log "Configuration restored: ${path}"
   return 0
 }
 
@@ -2008,15 +2058,15 @@ restore_default_timesyncd() {
 
 do_restore() {
   local host ok_line
-  log "Режим: восстановление настроек из ${RESTORE_FILE}."
-  load_backup_file "$RESTORE_FILE" || die "Не удалось прочитать резервную копию."
+  log "Mode: restore settings from ${RESTORE_FILE}."
+  load_backup_file "$RESTORE_FILE" || die "Could not read the backup."
   ALLOW=$BACKUP_ALLOW
   case "$BACKUP_ROLE" in
     none)
       disable_all_time_services || return 1
       ENGINE=none
       ACTION=set-time
-      write_state || die "Не удалось записать состояние."
+      write_state || die "Could not write state."
       print_ok "mode=restore role=none engine=none"
       return 0
       ;;
@@ -2024,14 +2074,14 @@ do_restore() {
       if [ "$BACKUP_DEFAULT_UPSTREAM" = "1" ] || [ "$BACKUP_SERVERS" = "default" ]; then
         ENGINE=timesyncd
         disable_all_time_services || return 1
-        restore_default_timesyncd || die "Не удалось восстановить клиент systemd-timesyncd."
-        write_state || die "Не удалось записать состояние."
+        restore_default_timesyncd || die "Could not restore the systemd-timesyncd client."
+        write_state || die "Could not write state."
         print_ok "mode=restore role=client engine=timesyncd server=default"
         return 0
       fi
       host=$(first_backup_server "$BACKUP_SERVERS")
       if [ -z "$host" ]; then
-        die "В резервной копии клиента не указаны серверы синхронизации."
+        die "The client backup does not list synchronization servers."
       fi
       SERVER=$host
       if [ -n "${CHRONOSYNC_ENGINE:-}" ]; then
@@ -2041,29 +2091,29 @@ do_restore() {
       else
         ENGINE=
       fi
-      ensure_engine client || die "Не удалось подготовить службу времени."
+      ensure_engine client || die "Could not prepare the time service."
       disable_all_time_services || return 1
-      apply_restore_config client || die "Не удалось восстановить конфигурацию клиента."
-      prepare_dirs || die "Не удалось подготовить каталоги службы времени."
-      choose_unit || die "Не удалось выбрать службу времени."
+      apply_restore_config client || die "Could not restore the client configuration."
+      prepare_dirs || die "Could not prepare time-service directories."
+      choose_unit || die "Could not select the time service."
       if [ "$ENGINE" = "timesyncd" ]; then
         if ! enable_timesyncd; then
           show_time_debug "$UNIT"
-          die "Не удалось запустить systemd-timesyncd."
+          die "Could not start systemd-timesyncd."
         fi
       else
         if ! start_unit "$UNIT"; then
           show_time_debug "$UNIT"
-          die "Не удалось запустить службу ${UNIT}."
+          die "Could not start service ${UNIT}."
         fi
       fi
       if ! verify_client; then
         show_time_debug "$UNIT"
-        die "Служба запущена, но синхронизация с ${SERVER} не подтверждена."
+        die "The service is running, but synchronization with ${SERVER} was not confirmed."
       fi
       sync_rtc || true
       ACTION=sync-from
-      write_state || die "Не удалось записать состояние."
+      write_state || die "Could not write state."
       print_ok "mode=restore role=client engine=${ENGINE} server=${BACKUP_SERVERS}"
       return 0
       ;;
@@ -2075,23 +2125,23 @@ do_restore() {
       else
         ENGINE=
       fi
-      ensure_engine server || die "Не удалось подготовить службу времени."
+      ensure_engine server || die "Could not prepare the time service."
       disable_all_time_services || return 1
       sync_rtc || true
-      apply_restore_config server || die "Не удалось восстановить конфигурацию сервера."
-      prepare_dirs || die "Не удалось подготовить каталоги службы времени."
+      apply_restore_config server || die "Could not restore the server configuration."
+      prepare_dirs || die "Could not prepare time-service directories."
       open_firewall || true
-      choose_unit || die "Не удалось выбрать службу времени."
+      choose_unit || die "Could not select the time service."
       if ! start_unit "$UNIT"; then
         show_time_debug "$UNIT"
-        die "Не удалось запустить службу ${UNIT}."
+        die "Could not start service ${UNIT}."
       fi
       if ! verify_server; then
         show_time_debug "$UNIT"
-        die "Служба ${UNIT} запущена, но сервер времени не отвечает."
+        die "Service ${UNIT} is running, but the time server is not answering."
       fi
       ACTION=time-server
-      write_state || die "Не удалось записать состояние."
+      write_state || die "Could not write state."
       print_ok "mode=restore role=server engine=${ENGINE}"
       return 0
       ;;
@@ -2103,28 +2153,28 @@ do_restore() {
       else
         ENGINE=
       fi
-      ensure_engine server || die "Не удалось подготовить службу времени."
+      ensure_engine server || die "Could not prepare the time service."
       disable_all_time_services || return 1
       sync_rtc || true
-      apply_restore_config both || die "Не удалось восстановить конфигурацию server+client."
-      prepare_dirs || die "Не удалось подготовить каталоги службы времени."
+      apply_restore_config both || die "Could not restore the server+client configuration."
+      prepare_dirs || die "Could not prepare time-service directories."
       open_firewall || true
-      choose_unit || die "Не удалось выбрать службу времени."
+      choose_unit || die "Could not select the time service."
       if ! start_unit "$UNIT"; then
         show_time_debug "$UNIT"
-        die "Не удалось запустить службу ${UNIT}."
+        die "Could not start service ${UNIT}."
       fi
       if ! verify_server; then
         show_time_debug "$UNIT"
-        die "Служба ${UNIT} запущена, но сервер времени не отвечает."
+        die "Service ${UNIT} is running, but the time server is not answering."
       fi
       ACTION=time-server
-      write_state || die "Не удалось записать состояние."
+      write_state || die "Could not write state."
       print_ok "mode=restore role=both engine=${ENGINE} server=${BACKUP_SERVERS}"
       return 0
       ;;
   esac
-  die "Не удалось восстановить настройки."
+  die "Could not restore the settings."
 }
 
 do_check() {
@@ -2132,11 +2182,11 @@ do_check() {
   epoch=$(date +%s)
   local_time=$(date '+%Y-%m-%d %H:%M:%S %Z')
   utc_time=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
-  log "Время устройства (локальное): ${local_time}"
-  log "Время устройства (UTC): ${utc_time}"
-  log "Unix-время: ${epoch}"
+  log "Device time (local): ${local_time}"
+  log "Device time (UTC): ${utc_time}"
+  log "Unix time: ${epoch}"
 
-  probe_device_role || die "Не удалось прочитать конфигурацию служб времени."
+  probe_device_role || die "Could not read the time-service configuration."
   ROLE_ENGINE=$PROBE_ROLE_ENGINE
   ROLE_STATE=$PROBE_ROLE_STATE
   ROLE_SERVER=$PROBE_ROLE_SERVER
@@ -2144,22 +2194,22 @@ do_check() {
   ROLE_DEFAULT_UPSTREAM=$PROBE_ROLE_DEFAULT_UPSTREAM
 
   if [ "$ROLE_SERVER" -eq 1 ]; then
-    server_yes=да
+    server_yes=yes
   else
-    server_yes=нет
+    server_yes=no
   fi
   if [ -n "$ROLE_UPSTREAMS" ] || [ "$ROLE_DEFAULT_UPSTREAM" -eq 1 ]; then
-    client_yes=да
+    client_yes=yes
   else
-    client_yes=нет
+    client_yes=no
   fi
-  log "Сервер времени: ${server_yes}"
-  log "Клиент сервера времени: ${client_yes}"
-  if [ "$client_yes" = "да" ]; then
+  log "Time server: ${server_yes}"
+  log "Time client: ${client_yes}"
+  if [ "$client_yes" = "yes" ]; then
     if [ "$ROLE_DEFAULT_UPSTREAM" -eq 1 ]; then
-      log "Сервер синхронизации: встроенный список systemd-timesyncd"
+      log "Synchronization server: systemd-timesyncd built-in list"
     else
-      log "Сервер синхронизации: ${ROLE_UPSTREAMS}"
+      log "Synchronization server: ${ROLE_UPSTREAMS}"
     fi
   fi
   case "$ROLE_STATE" in
@@ -2168,46 +2218,46 @@ do_check() {
       if [ "$ROLE_ENGINE" = "timesyncd" ]; then
         label=systemd-timesyncd
       fi
-      svc="${label} (запущена)"
+      svc="${label} (running)"
       ;;
     inactive)
       label=$ROLE_ENGINE
       if [ "$ROLE_ENGINE" = "timesyncd" ]; then
         label=systemd-timesyncd
       fi
-      svc="${label} (не запущена)"
+      svc="${label} (not running)"
       ;;
     unknown)
       label=$ROLE_ENGINE
       if [ "$ROLE_ENGINE" = "timesyncd" ]; then
         label=systemd-timesyncd
       fi
-      svc="${label} (состояние неизвестно)"
+      svc="${label} (state unknown)"
       ;;
     *)
-      svc=нет
+      svc=none
       ;;
   esac
-  log "Служба: ${svc}"
+  log "Service: ${svc}"
   query_sync
   case "$SYNC_STATE" in
     yes)
-      sync_word=да
+      sync_word=yes
       ;;
     no)
-      sync_word=нет
+      sync_word=no
       ;;
     *)
-      sync_word="нет данных"
+      sync_word="no data"
       ;;
   esac
-  log "Синхронизация с внешним сервером: ${sync_word}"
+  log "Synchronized to an external server: ${sync_word}"
 
-  if [ "$server_yes" = "да" ] && [ "$client_yes" = "да" ]; then
+  if [ "$server_yes" = "yes" ] && [ "$client_yes" = "yes" ]; then
     role_name=both
-  elif [ "$server_yes" = "да" ]; then
+  elif [ "$server_yes" = "yes" ]; then
     role_name=server
-  elif [ "$client_yes" = "да" ]; then
+  elif [ "$client_yes" = "yes" ]; then
     role_name=client
   else
     role_name=none
@@ -2228,77 +2278,77 @@ do_check() {
 }
 
 do_set_time() {
-  log "Режим: установка времени с машины установщика."
+  log "Mode: set the clock from the installer machine."
   maybe_backup_before_change || return 1
   disable_all_time_services || return 1
-  set_clock || die "Не удалось установить время."
+  set_clock || die "Could not set the time."
   ENGINE=none
-  write_state || die "Не удалось записать состояние."
-  log "Службы синхронизации времени выключены, чтобы они не сбросили выставленное время."
-  log "Дальше можно сделать устройство сервером: time-sync.sh time-server"
-  log "Или указать ему сервер: time-sync.sh sync-from <ip>"
+  write_state || die "Could not write state."
+  log "Time synchronization services are off so they do not overwrite the clock."
+  log "To make this device a server, run: time-sync.sh time-server"
+  log "Or point it at a server: time-sync.sh sync-from <ip>"
   print_ok "mode=set-time"
 }
 
 do_time_server() {
-  log "Режим: сервер времени."
+  log "Mode: time server."
   maybe_backup_before_change || return 1
-  ensure_engine server || die "Не удалось подготовить службу времени."
+  ensure_engine server || die "Could not prepare the time service."
   disable_all_time_services || return 1
   if [ -n "$NORM_SPEC" ]; then
-    set_clock || die "Не удалось установить время."
+    set_clock || die "Could not set the time."
   else
-    log "Предупреждение: время не передано. Сервер будет раздавать текущие часы устройства."
+    log "Warning: no time was given. The server will serve the current device clock."
     sync_rtc || true
   fi
-  apply_config server || die "Не удалось записать конфигурацию сервера времени."
-  prepare_dirs || die "Не удалось подготовить каталоги службы времени."
+  apply_config server || die "Could not write the time server configuration."
+  prepare_dirs || die "Could not prepare time-service directories."
   open_firewall || true
-  choose_unit || die "Не удалось выбрать службу времени."
+  choose_unit || die "Could not select the time service."
   if ! start_unit "$UNIT"; then
     show_time_debug "$UNIT"
-    die "Не удалось запустить службу ${UNIT}."
+    die "Could not start service ${UNIT}."
   fi
   if ! verify_server; then
     show_time_debug "$UNIT"
-    die "Служба ${UNIT} запущена, но время не раздаётся."
+    die "Service ${UNIT} is running, but it is not serving time."
   fi
-  write_state || die "Не удалось записать состояние."
-  log "Сервер времени слушает udp/123."
-  log "Он раздаёт выставленное время и не подстраивается по интернету."
-  log "Повторный запуск time-server с новым временем поправляет часы."
-  log "На остальных устройствах выполните sync-from с одним из адресов:"
+  write_state || die "Could not write state."
+  log "The time server is listening on udp/123."
+  log "It serves the configured time and does not follow the Internet."
+  log "Run time-server again with a new time to correct the clock."
+  log "On the other devices, run sync-from with one of these addresses:"
   print_addresses
   show_brief_status || true
   print_ok "mode=time-server engine=${ENGINE}"
 }
 
 do_sync_from() {
-  log "Режим: клиент сервера времени ${SERVER}."
+  log "Mode: client of time server ${SERVER}."
   maybe_backup_before_change || return 1
-  ensure_engine client || die "Не удалось подготовить службу времени."
+  ensure_engine client || die "Could not prepare the time service."
   disable_all_time_services || return 1
-  apply_config client || die "Не удалось записать конфигурацию клиента."
-  prepare_dirs || die "Не удалось подготовить каталоги службы времени."
-  choose_unit || die "Не удалось выбрать службу времени."
+  apply_config client || die "Could not write the client configuration."
+  prepare_dirs || die "Could not prepare time-service directories."
+  choose_unit || die "Could not select the time service."
   if [ "$ENGINE" = "timesyncd" ]; then
     if ! enable_timesyncd; then
       show_time_debug "$UNIT"
-      die "Не удалось запустить systemd-timesyncd."
+      die "Could not start systemd-timesyncd."
     fi
   else
     if ! start_unit "$UNIT"; then
       show_time_debug "$UNIT"
-      die "Не удалось запустить службу ${UNIT}."
+      die "Could not start service ${UNIT}."
     fi
   fi
   if ! verify_client; then
     show_time_debug "$UNIT"
-    die "Не удалось синхронизироваться с ${SERVER}. Проверьте, что на нём выполнен time-server, открыт udp/123 и адрес доступен."
+    die "Could not synchronize with ${SERVER}. Check that time-server was run there, udp/123 is open, and the address is reachable."
   fi
   sync_rtc || true
-  write_state || die "Не удалось записать состояние."
-  log "Устройство синхронизируется с ${SERVER}."
+  write_state || die "Could not write state."
+  log "The device is synchronizing with ${SERVER}."
   show_brief_status || true
   print_ok "mode=sync-from engine=${ENGINE} server=${SERVER}"
 }
@@ -2321,7 +2371,7 @@ expect_fail() {
   name=$1
   shift
   if "$@"; then
-    printf 'FAIL %s (ожидался отказ)\n' "$name" >&2
+    printf 'FAIL %s (expected failure)\n' "$name" >&2
     FAILS=$((FAILS + 1))
     return 0
   fi
@@ -2353,7 +2403,7 @@ self_test() {
   expect_ok "offset" valid_time "2026-10-24 14:18:00+05:00"
   expect_ok "ru" valid_time "24.10.2026 14:18:00"
   expect_fail "empty time" valid_time ""
-  expect_fail "junk time" valid_time "вчера"
+  expect_fail "junk time" valid_time "yesterday"
   expect_fail "short epoch" valid_time "123"
 
   expect_ok "ipv4" valid_ipv4 "192.168.0.1"
@@ -2389,7 +2439,10 @@ self_test() {
   expect_ok "csv sync" chrony_csv_synced "^,*,192.168.0.10,2"
   expect_fail "csv unsync" chrony_csv_synced "^,?,192.168.0.10,0"
   expect_ok "track" chrony_tracking_ok "7F7F0101,8,1,0,0,0,0,0,0,0,0,0,Normal"
+  expect_ok "track leap 0" chrony_tracking_ok "7F7F0101,8,1,0,0,0,0,0,0,0,0,0,0"
+  expect_ok "track text" chrony_tracking_ok "$(printf '%s\n' 'Reference ID    : 7F7F0101 ()' 'Stratum         : 8' 'Leap status     : Normal')"
   expect_fail "track leap" chrony_tracking_ok "7F7F0101,0,1,0,0,0,0,0,0,0,0,0,Not synchronised"
+  expect_fail "track text unsync" chrony_tracking_ok "$(printf '%s\n' 'Stratum         : 0' 'Leap status     : Not synchronised')"
 
   conf=$(build_chrony_server_conf)
   if printf '%s\n' "$conf" | grep -q '^local stratum 8'; then
@@ -2489,7 +2542,7 @@ main() {
   need_cmd awk
   need_cmd grep
   if ! date -d "@0" >/dev/null 2>&1; then
-    die "Нужна GNU date из coreutils: команда date -d не работает."
+    die "GNU date from coreutils is required: date -d does not work."
   fi
   validate_args
   if needs_privilege; then
@@ -2515,7 +2568,7 @@ main() {
       do_restore
       ;;
     *)
-      die "Неизвестный режим."
+      die "Unknown mode."
       ;;
   esac
 }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Проверка time-sync.sh без изменения часов системы.
+# Exercise time-sync.sh without changing the system clock.
 set -eu
 
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
@@ -12,7 +12,7 @@ unset CHRONOSYNC_ENGINE || true
 unset CHRONOSYNC_ALLOW || true
 
 if [ ! -f "$SCRIPT" ]; then
-  printf 'Нет файла %s\n' "$SCRIPT" >&2
+  printf 'Missing file %s\n' "$SCRIPT" >&2
   exit 1
 fi
 
@@ -25,7 +25,7 @@ run_case() {
   rc=$?
   set -e
   if [ "$rc" -ne "$expected" ]; then
-    printf 'FAIL %s (код %s, ожидался %s)\n' "$name" "$rc" "$expected" >&2
+    printf 'FAIL %s (code %s, expected %s)\n' "$name" "$rc" "$expected" >&2
     printf '%s\n' "$LAST_OUT" >&2
     FAIL=1
     return 0
@@ -37,7 +37,7 @@ assert_contains() {
   name=$1
   needle=$2
   if ! printf '%s\n' "$LAST_OUT" | grep -F -q -- "$needle"; then
-    printf 'FAIL %s: нет строки: %s\n' "$name" "$needle" >&2
+    printf 'FAIL %s: missing text: %s\n' "$name" "$needle" >&2
     printf '%s\n' "$LAST_OUT" >&2
     FAIL=1
     return 0
@@ -49,7 +49,7 @@ assert_not_contains() {
   name=$1
   needle=$2
   if printf '%s\n' "$LAST_OUT" | grep -F -q -- "$needle"; then
-    printf 'FAIL %s: лишняя строка: %s\n' "$name" "$needle" >&2
+    printf 'FAIL %s: unexpected text: %s\n' "$name" "$needle" >&2
     printf '%s\n' "$LAST_OUT" >&2
     FAIL=1
     return 0
@@ -58,7 +58,7 @@ assert_not_contains() {
 }
 
 if grep -q "$(printf '\r')" "$SCRIPT"; then
-  printf 'FAIL CRLF в time-sync.sh\n' >&2
+  printf 'FAIL CRLF in time-sync.sh\n' >&2
   FAIL=1
 else
   printf 'OK LF\n'
@@ -100,7 +100,7 @@ run_case "two hosts" 1 dash "$SCRIPT" --dry-run sync-from 192.168.0.10 extra
 
 BACKUP_ROOT="/tmp/chronosync-backup-$$"
 run_case "dry backup set" 0 dash "$SCRIPT" --dry-run --backup "$BACKUP_ROOT" set-time 1761307080
-assert_contains "backup set msg" "Резервная копия настроек"
+assert_contains "backup set msg" "Saved time settings"
 assert_contains "backup set ok" "CHRONOSYNC_OK mode=set-time"
 rm -rf "$BACKUP_ROOT" || true
 
@@ -112,14 +112,14 @@ if [ "$delta" -lt 0 ]; then
   delta=$((-delta))
 fi
 if [ "$delta" -gt 30 ]; then
-  printf 'FAIL часы системы изменились на %s с\n' "$delta" >&2
+  printf 'FAIL system clock changed by %s s\n' "$delta" >&2
   FAIL=1
 else
   printf 'OK clock unchanged\n'
 fi
 assert_contains "dry set date" "[dry-run] date -s @1761307080"
 assert_contains "dry set ok" "CHRONOSYNC_OK mode=set-time"
-assert_contains "dry set ntp off" "Службы синхронизации времени выключены"
+assert_contains "dry set ntp off" "Time synchronization services are off"
 
 run_case "dry set wall" 0 dash "$SCRIPT" --dry-run set-time 2026-10-24 14:18:00+05:00
 assert_contains "wall spec" "[dry-run] date -s 2026-10-24 14:18:00+05:00"
@@ -141,7 +141,7 @@ else
 fi
 
 run_case "dry server no time" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run сервер
-assert_contains "warn no time" "время не передано"
+assert_contains "warn no time" "no time was given"
 assert_not_contains "no date" "[dry-run] date -s"
 
 run_case "dry allow" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run time-server --allow 10.50.1.5/16 1761307080
@@ -173,7 +173,7 @@ assert_contains "timesyncd file" "/etc/systemd/timesyncd.conf.d/chronosync.conf"
 assert_contains "timesyncd ok" "CHRONOSYNC_OK mode=sync-from engine=timesyncd server=192.168.1.5"
 
 run_case "timesyncd server" 1 env CHRONOSYNC_ENGINE=timesyncd dash "$SCRIPT" --dry-run time-server 1761307080
-assert_contains "timesyncd refuse" "systemd-timesyncd не может быть сервером"
+assert_contains "timesyncd refuse" "systemd-timesyncd cannot be a time server"
 assert_not_contains "timesyncd server ok" "CHRONOSYNC_OK"
 
 run_case "bad engine" 1 env CHRONOSYNC_ENGINE=openntpd dash "$SCRIPT" --dry-run time-server
@@ -187,24 +187,24 @@ if [ "$delta" -lt 0 ]; then
   delta=$((-delta))
 fi
 if [ "$delta" -gt 30 ]; then
-  printf 'FAIL check изменил часы на %s с\n' "$delta" >&2
+  printf 'FAIL check changed the clock by %s s\n' "$delta" >&2
   FAIL=1
 else
   printf 'OK check clock\n'
 fi
-assert_contains "check local" "Время устройства (локальное):"
-assert_contains "check utc" "Время устройства (UTC):"
-assert_contains "check unix" "Unix-время:"
-assert_contains "check is server" "Сервер времени:"
-assert_contains "check is client" "Клиент сервера времени:"
+assert_contains "check local" "Device time (local):"
+assert_contains "check utc" "Device time (UTC):"
+assert_contains "check unix" "Unix time:"
+assert_contains "check is server" "Time server:"
+assert_contains "check is client" "Time client:"
 assert_contains "check ok" "CHRONOSYNC_OK mode=check"
-run_case "check extra" 1 dash "$SCRIPT" check лишнее
+run_case "check extra" 1 dash "$SCRIPT" check extra
 assert_not_contains "check extra ok" "CHRONOSYNC_OK"
 run_case "check alias" 0 dash "$SCRIPT" проверка
 assert_contains "check alias ok" "CHRONOSYNC_OK mode=check"
 
 if [ "$FAIL" -ne 0 ]; then
-  printf 'Тесты не прошли\n' >&2
+  printf 'Tests failed\n' >&2
   exit 1
 fi
-printf 'Все проверки прошли\n'
+printf 'All checks passed\n'
