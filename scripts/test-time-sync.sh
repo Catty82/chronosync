@@ -198,6 +198,7 @@ assert_contains "check local" "Device time (local):"
 assert_contains "check utc" "Device time (UTC):"
 assert_contains "check unix" "Unix time:"
 assert_contains "check is server" "Time server:"
+assert_contains "check serving" "Serving time:"
 assert_contains "check is client" "Time client:"
 assert_contains "check ok" "CHRONOSYNC_OK mode=check"
 run_case "check extra" 1 dash "$SCRIPT" check extra

@@ -2178,6 +2178,16 @@ do_restore() {
   die "Could not restore the settings."
 }
 
+serving_status() {
+  SERVING=no
+  if [ "$1" -eq 1 ] && [ "$2" = "active" ]; then
+    SERVING=yes
+  elif [ "$1" -eq 1 ] && [ "$2" = "unknown" ]; then
+    SERVING=unknown
+  fi
+  return 0
+}
+
 do_check() {
   local epoch local_time utc_time server_yes client_yes svc sync_word role_name servers_csv engine_out label
   epoch=$(date +%s)
@@ -2194,8 +2204,11 @@ do_check() {
   ROLE_UPSTREAMS=$PROBE_ROLE_UPSTREAMS
   ROLE_DEFAULT_UPSTREAM=$PROBE_ROLE_DEFAULT_UPSTREAM
 
-  if [ "$ROLE_SERVER" -eq 1 ]; then
+  serving_status "$ROLE_SERVER" "$ROLE_STATE"
+  if [ "$SERVING" = "yes" ]; then
     server_yes=yes
+  elif [ "$SERVING" = "unknown" ]; then
+    server_yes=unknown
   else
     server_yes=no
   fi
@@ -2204,7 +2217,22 @@ do_check() {
   else
     client_yes=no
   fi
+  label=$ROLE_ENGINE
+  if [ "$ROLE_ENGINE" = "timesyncd" ]; then
+    label=systemd-timesyncd
+  fi
+  if [ -z "$label" ]; then
+    label="time service"
+  fi
   log "Time server: ${server_yes}"
+  log "Serving time: ${SERVING}"
+  if [ "$ROLE_SERVER" -eq 1 ] && [ "$ROLE_STATE" != "active" ]; then
+    if [ "$ROLE_STATE" = "unknown" ]; then
+      log "Not distributing time: ${label} is configured as a server, but the service state is unknown."
+    else
+      log "Not distributing time: ${label} is configured as a server, but it is not running."
+    fi
+  fi
   log "Time client: ${client_yes}"
   if [ "$client_yes" = "yes" ]; then
     if [ "$ROLE_DEFAULT_UPSTREAM" -eq 1 ]; then
@@ -2215,24 +2243,12 @@ do_check() {
   fi
   case "$ROLE_STATE" in
     active)
-      label=$ROLE_ENGINE
-      if [ "$ROLE_ENGINE" = "timesyncd" ]; then
-        label=systemd-timesyncd
-      fi
       svc="${label} (running)"
       ;;
     inactive)
-      label=$ROLE_ENGINE
-      if [ "$ROLE_ENGINE" = "timesyncd" ]; then
-        label=systemd-timesyncd
-      fi
       svc="${label} (not running)"
       ;;
     unknown)
-      label=$ROLE_ENGINE
-      if [ "$ROLE_ENGINE" = "timesyncd" ]; then
-        label=systemd-timesyncd
-      fi
       svc="${label} (state unknown)"
       ;;
     *)
@@ -2254,9 +2270,9 @@ do_check() {
   esac
   log "Synchronized to an external server: ${sync_word}"
 
-  if [ "$server_yes" = "yes" ] && [ "$client_yes" = "yes" ]; then
+  if [ "$ROLE_SERVER" -eq 1 ] && [ "$client_yes" = "yes" ]; then
     role_name=both
-  elif [ "$server_yes" = "yes" ]; then
+  elif [ "$ROLE_SERVER" -eq 1 ]; then
     role_name=server
   elif [ "$client_yes" = "yes" ]; then
     role_name=client
@@ -2275,7 +2291,7 @@ do_check() {
   else
     engine_out=none
   fi
-  print_ok "mode=check role=${role_name} engine=${engine_out} server=${servers_csv} synced=${SYNC_STATE} time=${epoch}"
+  print_ok "mode=check role=${role_name} serving=${SERVING} engine=${engine_out} server=${servers_csv} synced=${SYNC_STATE} time=${epoch}"
 }
 
 do_set_time() {
@@ -2442,6 +2458,15 @@ self_test() {
   expect_fail "csv unsync" chrony_csv_synced "^,?,192.168.0.10,0"
   expect_ok "track" chrony_tracking_ok "7F7F0101,8,1,0,0,0,0,0,0,0,0,0,Normal"
   expect_ok "track leap 0" chrony_tracking_ok "7F7F0101,8,1,0,0,0,0,0,0,0,0,0,0"
+  serving_status 1 active
+  check_eq "serving active" "$SERVING" "yes"
+  serving_status 1 inactive
+  check_eq "serving stopped" "$SERVING" "no"
+  serving_status 0 active
+  check_eq "serving client" "$SERVING" "no"
+  serving_status 1 unknown
+  check_eq "serving unknown" "$SERVING" "unknown"
+
   expect_ok "track text" chrony_tracking_ok "$(printf '%s\n' 'Reference ID    : 7F7F0101 ()' 'Stratum         : 8' 'Leap status     : Normal')"
   expect_fail "track leap" chrony_tracking_ok "7F7F0101,0,1,0,0,0,0,0,0,0,0,0,Not synchronised"
   expect_fail "track text unsync" chrony_tracking_ok "$(printf '%s\n' 'Stratum         : 0' 'Leap status     : Not synchronised')"
