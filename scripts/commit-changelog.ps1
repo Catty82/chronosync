@@ -5,8 +5,13 @@
 
 .DESCRIPTION
   For each commit: reads message/author/date/diff, asks Codex for a short
-  human-friendly explanation, then prints either the MA journal format or
-  Keep a Changelog style.
+  human-friendly explanation, then prints either a simplified MA journal
+  line or Keep a Changelog (https://keepachangelog.com) style.
+
+  MA line (date = commit date; no task/+ second date):
+    18.09.2026		MA	Исправление ...  v8.8.1-13-g86484e445
+
+  Keep a Changelog entry includes the short commit hash.
 
   Requires: git, Codex CLI (`codex`) already logged in / CODEX_API_KEY set.
 
@@ -344,12 +349,15 @@ function Invoke-CodexExplain([pscustomobject] $Info) {
 function Format-MaLine(
   [pscustomobject] $Info,
   [string] $Summary,
-  [string] $Code,
-  [string] $SecondDateText
+  [string] $Code
 ) {
   $d1 = Format-RuDate $Info.CommitDate
-  # Tabs match the journal samples: date, blank, author, description + date version
-  return ("{0}`t`t{1}`t{2} + {3} {4}" -f $d1, $Code, $Summary, $SecondDateText, $Info.Describe)
+  $ver = $Info.Describe
+  if ($ver -notmatch [regex]::Escape($Info.ShortSha)) {
+    $ver = '{0} ({1})' -f $ver, $Info.ShortSha
+  }
+  # Date = commit date (task-open date is not in git). No "+" / second date.
+  return ("{0}`t`t{1}`t{2}  {3}" -f $d1, $Code, $Summary.Trim(), $ver)
 }
 
 function Get-KeepAChangelogSection([string] $Summary) {
@@ -362,9 +370,10 @@ function Get-KeepAChangelogSection([string] $Summary) {
 
 function Format-KeepAChangelogLine([pscustomobject] $Info, [string] $Summary) {
   $section = Get-KeepAChangelogSection $Summary
+  # Keep a Changelog bullet; hash is always shown (short SHA).
   return [pscustomobject]@{
     Section = $section
-    Line    = ('- {0} (`{1}`, {2})' -f $Summary.TrimEnd('.'), $Info.Describe, (Format-RuDate $Info.CommitDate))
+    Line    = ('- {0} ({1}) [`{2}`]' -f $Summary.TrimEnd('.'), (Format-RuDate $Info.CommitDate), $Info.ShortSha)
   }
 }
 
@@ -380,7 +389,6 @@ if (-not (Test-Path -LiteralPath (Join-Path $RepoPath '.git'))) {
 }
 
 $refs = Get-CommitList
-$secondDate = if ($ReleaseDate) { $ReleaseDate } else { Format-RuDate (Get-Date) }
 
 $maLines = New-Object System.Collections.Generic.List[string]
 $kac = @{
@@ -399,6 +407,7 @@ foreach ($ref in $refs) {
 
   $obj = [pscustomobject]@{
     Sha        = $info.Sha
+    ShortSha   = $info.ShortSha
     Date       = (Format-RuDate $info.CommitDate)
     AuthorCode = $code
     Summary    = $summary
@@ -408,7 +417,7 @@ foreach ($ref in $refs) {
   [void]$objects.Add($obj)
 
   if ($Format -eq 'Ma') {
-    [void]$maLines.Add((Format-MaLine $info $summary $code $secondDate))
+    [void]$maLines.Add((Format-MaLine $info $summary $code))
   } else {
     $row = Format-KeepAChangelogLine $info $summary
     [void]$kac[$row.Section].Add($row.Line)
