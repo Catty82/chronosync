@@ -102,6 +102,10 @@ time-server и синхронизация (выберите один вариа�
   --keep-upstream   оставить текущие внешние серверы NTP на устройстве
   --upstream <сервер>  задать upstream; через запятую или повтор флага
 
+Примеры:
+  time-sync.cmd time-server --keep-upstream
+  time-sync.cmd time-server --upstream 10.0.0.1,pool.ntp.org
+
 Дополнительные имена режимов: set, server, client, check, время, сервер, клиент, проверка.
 
 Служба — встроенная W32Time. Режим sync-from по-прежнему использует один указанный сервер.
@@ -344,6 +348,10 @@ function Parse-TimeServerRest {
 function Parse-Arguments {
   $argv = @($args)
   $items = New-Object System.Collections.Generic.List[string]
+  $script:ServerSync = 'standalone'
+  $script:ServerSyncChosen = $false
+  $script:UpstreamList = New-Object System.Collections.Generic.List[string]
+  $script:ServerUpstreamMode = 'none'
   $index = 0
   $literal = $false
   while ($index -lt $argv.Count) {

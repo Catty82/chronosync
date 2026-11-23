@@ -22,6 +22,8 @@
 # Examples:
 #   time-sync.sh set-time 1761307080
 #   time-sync.sh time-server 1761307080
+#   time-sync.sh time-server --keep-upstream --backup time-sync-settings
+#   time-sync.sh time-server --upstream 10.0.0.1,pool.ntp.org
 #   time-sync.sh sync-from 192.168.0.10
 #   time-sync.sh --backup /var/lib/chronosync/backups set-time 1761307080
 #   time-sync.sh restore /var/lib/chronosync/backups/client
@@ -128,13 +130,19 @@ Modes:
   set-time      set the clock and turn synchronization off
   time-server   make this device a time server (udp/123)
   sync-from     follow a server configured with time-server
+  check         show the time, server role, and upstream server address
+  restore       restore settings from a file saved with --backup
 
 time-server sync (pick one; default is --standalone):
   --standalone      local clock only, no upstream (installer default)
   --keep-upstream   keep upstream NTP servers already on the device
   --upstream <host> follow upstream host(s); comma-separated or repeat the flag
-  check         show the time, server role, and upstream server address
-  restore       restore settings from a file saved with --backup
+
+Examples:
+  time-sync.sh time-server 1761307080
+  time-sync.sh time-server --keep-upstream --backup time-sync-settings
+  time-sync.sh time-server --upstream 10.0.0.1,pool.ntp.org
+  time-sync.sh sync-from 192.168.0.10
 
 set-time only sets the clock and turns synchronization off.
 After set-time, run the role again:

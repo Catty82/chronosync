@@ -81,6 +81,7 @@ assert_contains "help manual server" "does not distribute time"
 assert_contains "help check" "check"
 assert_contains "help restore" "restore"
 assert_contains "help backup" "--backup"
+assert_contains "help keep backup" "time-server --keep-upstream --backup time-sync-settings"
 assert_not_contains "help ok" "CHRONOSYNC_OK"
 
 run_case "no args" 1 dash "$SCRIPT"
