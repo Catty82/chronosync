@@ -2,7 +2,8 @@
 #
 # Windows-вариант scripts/time-sync.sh. Для установщика:
 #   time-sync.cmd set-time <время>
-#   time-sync.cmd time-server [время] [--allow a.b.c.d/nn]
+#   time-sync.cmd time-server [время] [--standalone | --keep-upstream | --upstream <сервер>]
+#                             [--allow a.b.c.d/nn]
 #   time-sync.cmd sync-from <ip-или-имя-сервера>
 #   time-sync.cmd check
 #
@@ -13,8 +14,9 @@
 # и клиент — это W32Time на udp/123.
 #
 # set-time выставляет часы и выключает синхронизацию.
-# time-server раздаёт выставленное время по udp/123 в частные сети и не
-# ходит в интернет. Источник — локальные часы (Type=NoSync, AnnounceFlags=5).
+# time-server по умолчанию (--standalone) раздаёт локальные часы и не ходит вверх.
+# --keep-upstream сохраняет текущие внешние серверы NTP.
+# --upstream задаёт один или несколько upstream-серверов (через запятую или повтор флага).
 # sync-from берёт время только с указанного сервера и отключает раздачу.
 #
 # Нужны права администратора. Логин и пароль скрипт не принимает.
@@ -42,6 +44,10 @@ $script:Action = ''
 $script:Rest = ''
 $script:Allow = ''
 $script:AllowFlag = $false
+$script:ServerSync = 'standalone'
+$script:ServerSyncChosen = $false
+$script:UpstreamList = New-Object System.Collections.Generic.List[string]
+$script:ServerUpstreamMode = 'none'
 $script:Engine = ''
 $script:Server = ''
 $script:NormKind = ''
@@ -72,7 +78,7 @@ function Show-Usage {
   $text = @'
 Использование:
   time-sync.cmd set-time <время>
-  time-sync.cmd time-server [время] [--allow a.b.c.d/nn]
+  time-sync.cmd time-server [время] [--standalone | --keep-upstream | --upstream <сервер>]
   time-sync.cmd sync-from <адрес-сервера-времени>
   time-sync.cmd check
   time-sync.cmd --dry-run <режим> [аргументы]
@@ -91,12 +97,18 @@ function Show-Usage {
   sync-from     брать время с сервера, настроенного как time-server
   check         показать время, роль сервера и адрес внешнего сервера
 
+time-server и синхронизация (выберите один вариант; по умолчанию --standalone):
+  --standalone      только локальные часы, без upstream (как раньше)
+  --keep-upstream   оставить текущие внешние серверы NTP на устройстве
+  --upstream <сервер>  задать upstream; через запятую или повтор флага
+
 Дополнительные имена режимов: set, server, client, check, время, сервер, клиент, проверка.
 
-Служба — встроенная W32Time. Сервер не использует time.windows.com и другие
-внешние NTP. Клиент оставляет один указанный сервер.
+Служба — встроенная W32Time. Режим sync-from по-прежнему использует один указанный сервер.
 --allow добавляет одну сеть к частным диапазонам, которым сервер отдаёт время.
 То же самое делает переменная CHRONOSYNC_ALLOW=a.b.c.d/nn.
+CHRONOSYNC_SERVER_SYNC=standalone|keep|upstream выбирает режим для time-server.
+CHRONOSYNC_UPSTREAM=host1,host2 задаёт upstream (это --upstream).
 CHRONOSYNC_ENGINE на Windows может быть только w32time.
 
 Логин, пароль и IP подключения скрипт не принимает.
@@ -254,6 +266,81 @@ function ConvertTo-NormalizedTime([string]$Value) {
   return $true
 }
 
+function Set-ServerSyncMode([string]$Mode) {
+  if ($script:ServerSyncChosen -and $script:ServerSync -ne $Mode) {
+    Die 'Для time-server укажите только один из параметров: --standalone, --keep-upstream, --upstream.'
+  }
+  $script:ServerSync = $Mode
+  $script:ServerSyncChosen = $true
+}
+
+function Add-UpstreamHostsFromCsv([string]$Csv) {
+  if ([string]::IsNullOrWhiteSpace($Csv)) { return }
+  foreach ($item in (($Csv -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+  if ($item.Contains(':')) { Die "Нужен IPv4-адрес или DNS-имя для --upstream. IPv6 не поддерживается: $item" }
+    if (-not (Test-ValidHost $item)) { Die "Некорректный адрес upstream: $item" }
+    if (-not $script:UpstreamList.Contains($item)) { [void]$script:UpstreamList.Add($item) }
+  }
+}
+
+function Apply-ChronoSyncUpstreamEnv {
+  if (-not [string]::IsNullOrWhiteSpace([string]$env:CHRONOSYNC_UPSTREAM)) {
+    Set-ServerSyncMode 'upstream'
+    Add-UpstreamHostsFromCsv ([string]$env:CHRONOSYNC_UPSTREAM)
+  }
+  $forced = [string]$env:CHRONOSYNC_SERVER_SYNC
+  if (-not [string]::IsNullOrWhiteSpace($forced)) {
+    if ($forced -ne 'standalone' -and $forced -ne 'keep' -and $forced -ne 'upstream') {
+      Die 'CHRONOSYNC_SERVER_SYNC должен быть standalone, keep или upstream.'
+    }
+    Set-ServerSyncMode $forced
+  }
+}
+
+function Parse-TimeServerOption([string]$Option, [string]$Arg) {
+  switch ($Option) {
+    '--standalone' { Set-ServerSyncMode 'standalone'; return }
+    '--keep-upstream' { Set-ServerSyncMode 'keep'; return }
+    '--upstream' {
+      if ([string]::IsNullOrWhiteSpace($Arg)) { Die '--upstream требует адрес сервера NTP (IPv4 или DNS).' }
+      Set-ServerSyncMode 'upstream'
+      Add-UpstreamHostsFromCsv $Arg
+      return
+    }
+    default { Die "Неизвестный параметр time-server: $Option" }
+  }
+}
+
+function Parse-TimeServerRest {
+  if ([string]::IsNullOrWhiteSpace($script:Rest)) { return }
+  $tokens = @($script:Rest -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  $timeTokens = New-Object System.Collections.Generic.List[string]
+  $index = 0
+  while ($index -lt $tokens.Count) {
+    $token = [string]$tokens[$index]
+    if ($token -eq '--standalone' -or $token -eq '--keep-upstream') {
+      Parse-TimeServerOption $token ''
+      $index++
+      continue
+    }
+    if ($token -eq '--upstream') {
+      $index++
+      if ($index -ge $tokens.Count) { Die '--upstream требует адрес сервера NTP (IPv4 или DNS).' }
+      Parse-TimeServerOption '--upstream' ([string]$tokens[$index])
+      $index++
+      continue
+    }
+    if ($token.StartsWith('--')) { Die "Неизвестный параметр time-server: $token" }
+    [void]$timeTokens.Add($token)
+    $index++
+  }
+  if ($timeTokens.Count -gt 0) {
+    $script:Rest = ($timeTokens -join ' ')
+  } else {
+    $script:Rest = ''
+  }
+}
+
 function Parse-Arguments {
   $argv = @($args)
   $items = New-Object System.Collections.Generic.List[string]
@@ -270,6 +357,17 @@ function Parse-Arguments {
       if (($index + 1) -ge $argv.Count) { Die '--allow требует сеть в виде a.b.c.d/nn' }
       $script:Allow = [string]$argv[$index + 1]
       $script:AllowFlag = $true
+      $index += 2
+      continue
+    }
+    if (-not $literal -and ($token -eq '--standalone' -or $token -eq '--keep-upstream')) {
+      Parse-TimeServerOption $token ''
+      $index++
+      continue
+    }
+    if (-not $literal -and $token -eq '--upstream') {
+      if (($index + 1) -ge $argv.Count) { Die '--upstream требует адрес сервера NTP (IPv4 или DNS).' }
+      Parse-TimeServerOption '--upstream' ([string]$argv[$index + 1])
       $index += 2
       continue
     }
@@ -317,8 +415,14 @@ function Parse-Arguments {
   }
   if ($script:Action -ne 'time-server') {
     if ($script:AllowFlag) { Die '--allow используется только вместе с time-server' }
+    if ($script:ServerSyncChosen) {
+      Die 'Параметры --standalone, --keep-upstream и --upstream используются только с time-server'
+    }
     $script:Allow = ''
+    $script:ServerSync = 'standalone'
+    $script:UpstreamList = New-Object System.Collections.Generic.List[string]
   }
+  Apply-ChronoSyncUpstreamEnv
 }
 
 function Assert-Arguments {
@@ -329,6 +433,10 @@ function Assert-Arguments {
     return
   }
   if ($script:Action -eq 'time-server') {
+    Parse-TimeServerRest
+    if ($script:ServerSync -eq 'upstream' -and $script:UpstreamList.Count -eq 0) {
+      Die 'Не указан upstream. Используйте --upstream <сервер> или CHRONOSYNC_UPSTREAM.'
+    }
     if (-not [string]::IsNullOrEmpty($script:Rest)) {
       if (-not (ConvertTo-NormalizedTime $script:Rest)) { Die $badTime }
     }
@@ -386,6 +494,137 @@ function Get-ServerCidrText {
     if (-not $seen.Contains($norm)) { [void]$seen.Add($norm) }
   }
   return ($seen -join ' ')
+}
+
+function Get-ServerHybridSettingRows([string[]]$Peers) {
+  if ($Peers.Count -eq 0) { return Get-ServerSettingRows }
+  $peerField = ($Peers | ForEach-Object { "$_,0x8" }) -join ' '
+  $rows = @(
+    'Parameters|Type|NTP|String'
+    ("Parameters|NtpServer|{0}|String" -f $peerField)
+    'Config|AnnounceFlags|5|DWord'
+    'TimeProviders\NtpServer|Enabled|1|DWord'
+    'TimeProviders\NtpClient|Enabled|1|DWord'
+    'TimeProviders\NtpServer|AllowNonstandardModeCombinations|1|DWord'
+    'Config|UtilizeSslTimeData|0|DWord'
+    'TimeProviders\VMICTimeProvider|Enabled|0|DWord'
+  )
+  return ($rows -join "`n")
+}
+
+function Get-ServerDomainHybridSettingRows {
+  $type = 'NT5DS'
+  if ($script:ServerSync -eq 'keep') {
+    $live = Get-W32Value 'Parameters' 'Type'
+    if ($live -eq 'AllSync') { $type = 'AllSync' }
+  }
+  $rows = @(
+    ("Parameters|Type|{0}|String" -f $type)
+    'Parameters|NtpServer||String'
+    'Config|AnnounceFlags|5|DWord'
+    'TimeProviders\NtpServer|Enabled|1|DWord'
+    'TimeProviders\NtpClient|Enabled|1|DWord'
+    'TimeProviders\NtpServer|AllowNonstandardModeCombinations|1|DWord'
+    'Config|UtilizeSslTimeData|0|DWord'
+    'TimeProviders\VMICTimeProvider|Enabled|0|DWord'
+  )
+  return ($rows -join "`n")
+}
+
+function Get-ConfiguredUpstreamInfo {
+  $type = Get-W32Value 'Parameters' 'Type'
+  $clientOn = (Get-W32Value 'TimeProviders\NtpClient' 'Enabled') -eq '1'
+  $raw = Get-W32Value 'Parameters' 'NtpServer'
+  $peers = @((Get-PeersFromRaw $raw) -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if ($clientOn -and ($type -eq 'NT5DS' -or $type -eq 'AllSync')) {
+    return @{ Sync = 'domain'; Type = $type; Peers = @() }
+  }
+  if ($clientOn -and $peers.Count -gt 0) {
+    return @{ Sync = 'ntp'; Type = 'NTP'; Peers = $peers }
+  }
+  return @{ Sync = 'none'; Type = $type; Peers = @() }
+}
+
+function Resolve-TimeServerUpstreams {
+  $script:ServerUpstreamMode = 'none'
+  switch ($script:ServerSync) {
+    'standalone' { return }
+    'keep' {
+      $info = Get-ConfiguredUpstreamInfo
+      if ($info.Sync -eq 'domain') {
+        $script:ServerUpstreamMode = 'domain'
+        return
+      }
+      if ($info.Peers.Count -gt 0) {
+        $script:UpstreamList = New-Object System.Collections.Generic.List[string]
+        foreach ($peer in $info.Peers) { [void]$script:UpstreamList.Add([string]$peer) }
+        $script:ServerUpstreamMode = 'ntp'
+        return
+      }
+      Write-Line 'Предупреждение: внешние серверы NTP в текущей конфигурации не найдены.'
+      Write-Line 'Предупреждение: продолжаем как автономный сервер времени.'
+      $script:ServerSync = 'standalone'
+      return
+    }
+    'upstream' {
+      $script:ServerUpstreamMode = 'ntp'
+      return
+    }
+  }
+}
+
+function Get-ServerSettingRowsForMode {
+  if ($script:ServerUpstreamMode -eq 'domain') { return Get-ServerDomainHybridSettingRows }
+  if ($script:ServerUpstreamMode -eq 'ntp' -and $script:UpstreamList.Count -gt 0) {
+    return Get-ServerHybridSettingRows ($script:UpstreamList.ToArray())
+  }
+  return Get-ServerSettingRows
+}
+
+function Get-UpstreamCsv {
+  if ($script:UpstreamList.Count -eq 0) { return '' }
+  return ($script:UpstreamList -join ',')
+}
+
+function Add-UpstreamClientFirewall {
+  foreach ($peer in $script:UpstreamList) {
+    if (-not (Test-ValidIpv4 $peer)) { continue }
+    $saved = $script:Server
+    $script:Server = $peer
+    Add-ClientFirewall
+    $script:Server = $saved
+  }
+}
+
+function Wait-HybridUpstreamReady {
+  if ($script:DryRun) {
+    Write-Line '[dry-run] проверка синхронизации с upstream'
+    return $true
+  }
+  if ($script:ServerUpstreamMode -eq 'domain') {
+    $i = 0
+    while ($i -lt 20) {
+      if (($i % 4) -eq 0) { Invoke-W32tm '/resync' '/force' | Out-Null }
+      $query = Invoke-W32tm '/query' '/source'
+      if ($query.Code -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$query.Text)) {
+        $first = (($query.Text -split "`n")[0]).Trim().Trim("`r")
+        $src = (($first -split ',')[0]).Trim()
+        if ($src -notmatch '^(Local CMOS|Free-running)' ) { return $true }
+      }
+      Start-Sleep -Seconds 1
+      $i++
+    }
+    return $false
+  }
+  if ($script:ServerUpstreamMode -ne 'ntp' -or $script:UpstreamList.Count -eq 0) { return $true }
+  $saved = $script:Server
+  $ready = $false
+  foreach ($peer in $script:UpstreamList) {
+    $script:Server = $peer
+    if (Wait-ClientReady) { $ready = $true; break }
+  }
+  $script:Server = $saved
+  return $ready
 }
 
 function Get-ServerSettingRows {
@@ -756,6 +995,8 @@ function Write-StateFile {
     "engine=$($script:Engine)"
     "server=$($script:Server)"
     "allow=$($script:Allow)"
+    "server_sync=$($script:ServerSync)"
+    "upstreams=$(Get-UpstreamCsv)"
   )
   if ($script:DryRun) {
     Write-Line "[dry-run] запись $script:StateDir\state"
@@ -936,6 +1177,18 @@ function Invoke-SetTime {
 
 function Invoke-TimeServer {
   Write-Line 'Режим: сервер времени.'
+  Resolve-TimeServerUpstreams
+  switch ($script:ServerSync) {
+    'standalone' { Write-Line 'Синхронизация upstream: выкл. (автономные локальные часы).' }
+    'keep' {
+      if ($script:ServerUpstreamMode -eq 'domain') {
+        Write-Line 'Синхронизация upstream: сохраняется синхронизация домена.'
+      } else {
+        Write-Line ("Синхронизация upstream: сохранённые серверы: $($script:UpstreamList -join ' ').")
+      }
+    }
+    'upstream' { Write-Line ("Синхронизация upstream: $($script:UpstreamList -join ' ').") }
+  }
   Select-Engine
   Warn-IfPolicy
   Backup-W32Time
@@ -945,9 +1198,10 @@ function Invoke-TimeServer {
   } else {
     Write-Line 'Предупреждение: время не передано. Сервер будет раздавать текущие часы устройства.'
   }
-  Apply-SettingRows (Get-ServerSettingRows)
+  Apply-SettingRows (Get-ServerSettingRowsForMode)
   Remove-ChronoFirewall
   Add-ServerFirewall
+  if ($script:ServerUpstreamMode -ne 'none') { Add-UpstreamClientFirewall }
   Set-TimeServiceStartMode 'Automatic'
   if (-not (Start-TimeService)) {
     Show-TimeDebug
@@ -958,14 +1212,29 @@ function Invoke-TimeServer {
     Show-TimeDebug
     Die 'Служба W32Time запущена, но время не раздаётся.'
   }
+  if ($script:ServerUpstreamMode -ne 'none') {
+    if (Wait-HybridUpstreamReady) {
+      Write-Line 'Синхронизация с upstream выполнена.'
+    } else {
+      Write-Line 'Предупреждение: сервер слушает udp/123, но синхронизация с upstream ещё не готова.'
+      Write-Line 'Предупреждение: клиенты смогут пользоваться сервером, когда upstream станет доступен.'
+    }
+  }
   Write-StateFile
   Write-Line 'Сервер времени слушает udp/123.'
-  Write-Line 'Он раздаёт выставленное время и не подстраивается по интернету.'
-  Write-Line 'Повторный запуск time-server с новым временем поправляет часы.'
+  if ($script:ServerSync -eq 'standalone') {
+    Write-Line 'Он раздаёт локальные часы и не подстраивается по upstream.'
+    Write-Line 'Повторный запуск time-server с новым временем поправляет часы.'
+  } else {
+    Write-Line 'Он раздаёт время в локальную сеть и подстраивается по настроенным upstream.'
+  }
   Write-Line 'На остальных устройствах выполните sync-from с одним из адресов:'
   Write-Addresses
   Show-BriefStatus
-  Write-Ok 'mode=time-server engine=w32time'
+  $okExtra = "sync=$($script:ServerSync)"
+  $csv = Get-UpstreamCsv
+  if (-not [string]::IsNullOrWhiteSpace($csv)) { $okExtra += " upstream=$csv" }
+  Write-Ok "mode=time-server engine=w32time $okExtra"
 }
 
 function Invoke-SyncFrom {
@@ -1102,6 +1371,19 @@ function Invoke-SelfTest {
   Expect-Fail 'server pool' ($serverRows.Contains('pool.ntp.org'))
   Expect-Fail 'server windows' ($serverRows.Contains('time.windows.com'))
   Expect-Fail 'server peer flag' ($serverRows.Contains(',0x8'))
+
+  $hybridRows = Get-ServerHybridSettingRows @('10.0.0.5', 'ntp.example.com')
+  Expect-Ok 'hybrid type' ($hybridRows.Contains('Parameters|Type|NTP|String'))
+  Expect-Ok 'hybrid peer' ($hybridRows.Contains('Parameters|NtpServer|10.0.0.5,0x8 ntp.example.com,0x8|String'))
+  Expect-Ok 'hybrid client on' ($hybridRows.Contains('TimeProviders\NtpClient|Enabled|1|DWord'))
+  Expect-Ok 'hybrid server on' ($hybridRows.Contains('TimeProviders\NtpServer|Enabled|1|DWord'))
+  $domainRows = Get-ServerDomainHybridSettingRows
+  Expect-Ok 'domain type' ($domainRows.Contains('Parameters|Type|NT5DS|String'))
+  Expect-Ok 'domain client on' ($domainRows.Contains('TimeProviders\NtpClient|Enabled|1|DWord'))
+
+  $script:UpstreamList = New-Object System.Collections.Generic.List[string]
+  Add-UpstreamHostsFromCsv '10.0.0.1,ntp.example.com'
+  Check-Eq 'upstream csv' (Get-UpstreamCsv) '10.0.0.1,ntp.example.com'
 
   $script:Allow = '10.50.1.5/16'
   $cidrs = Get-ServerCidrText

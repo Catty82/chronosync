@@ -137,7 +137,8 @@ Assert-Contains 'server on' 'TimeProviders\NtpServer Enabled=1'
 Assert-Contains 'server client off' 'TimeProviders\NtpClient Enabled=0'
 Assert-Contains 'server allow' '192.168.0.0/16'
 Assert-Contains 'server link' '169.254.0.0/16'
-Assert-Contains 'server ok' 'CHRONOSYNC_OK mode=time-server engine=w32time'
+Assert-Contains 'server ok' 'CHRONOSYNC_OK mode=time-server engine=w32time sync=standalone'
+Assert-Contains 'server standalone log' 'Синхронизация upstream: выкл.'
 Assert-Contains 'server engine' 'Движок: w32time'
 Assert-Contains 'server date' '[dry-run] Set-Date @1761307080'
 Assert-Contains 'server compat' 'AllowNonstandardModeCombinations=1'
@@ -152,6 +153,18 @@ Assert-NotContains 'no date' '[dry-run] Set-Date'
 
 Invoke-Case 'dry allow' 0 @('--dry-run', 'time-server', '--allow', '10.50.1.5/16', '1761307080')
 Assert-Contains 'extra allow' '10.50.0.0/16'
+
+Invoke-Case 'dry server upstream' 0 @('--dry-run', 'time-server', '--upstream', '10.0.0.5,ntp.example.com', '1761307080')
+Assert-Contains 'upstream type' 'Type=NTP'
+Assert-Contains 'upstream peer' 'NtpServer=10.0.0.5,0x8 ntp.example.com,0x8'
+Assert-Contains 'upstream client on' 'TimeProviders\NtpClient Enabled=1'
+Assert-Contains 'upstream log' 'Синхронизация upstream: 10.0.0.5 ntp.example.com'
+Assert-Contains 'upstream ok' 'CHRONOSYNC_OK mode=time-server engine=w32time sync=upstream upstream=10.0.0.5,ntp.example.com'
+
+Invoke-Case 'upstream on client' 1 @('--dry-run', 'sync-from', '--upstream', '10.0.0.5', '192.168.0.10')
+Invoke-Case 'upstream empty' 1 @('--dry-run', 'time-server', '--upstream')
+Invoke-Case 'upstream conflict' 1 @('--dry-run', 'time-server', '--standalone', '--upstream', '10.0.0.5')
+Invoke-Case 'bad upstream' 1 @('--dry-run', 'time-server', '--upstream', '192.168.0.256')
 
 $env:CHRONOSYNC_ALLOW = '10.50.1.5/16'
 try {

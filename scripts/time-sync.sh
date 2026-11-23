@@ -13,7 +13,8 @@
 # The device time zone then does not affect the absolute time.
 #
 #   time-sync.sh set-time <time> [--backup <directory>]
-#   time-sync.sh time-server [time] [--allow a.b.c.d/nn] [--backup <directory>]
+#   time-sync.sh time-server [time] [--standalone | --keep-upstream | --upstream <host>[,<host>...]]
+#                             [--allow a.b.c.d/nn] [--backup <directory>]
 #   time-sync.sh sync-from <time-server-ip> [--backup <directory>]
 #   time-sync.sh restore <saved-settings-file>
 #   time-sync.sh check
@@ -31,7 +32,9 @@
 # time and does not follow a server. sync-from replaces a manual client clock
 # with the server clock.
 # time-server sets the clock (when a time is given) and serves it on udp/123
-# to private networks. The server does not use the Internet: the source is the set time.
+# to private networks. By default (--standalone) it does not follow an upstream.
+# --keep-upstream keeps the upstream servers already configured on the device.
+# --upstream sets one or more upstream NTP servers (comma-separated or repeated).
 # sync-from makes the device follow only the given server.
 #
 # chrony is preferred. If that package is missing from the repository, ntp is used.
@@ -51,6 +54,10 @@ ACTION=
 REST=
 ALLOW=
 ALLOW_FLAG=0
+SERVER_SYNC=standalone
+SERVER_SYNC_SET=0
+UPSTREAM_LIST=
+SERVER_UPSTREAM_CSV=
 ENGINE=
 SERVER=
 NORM_KIND=
@@ -103,7 +110,7 @@ usage() {
   cat <<'EOF'
 Usage:
   time-sync.sh set-time <time>
-  time-sync.sh time-server [time] [--allow a.b.c.d/nn]
+  time-sync.sh time-server [time] [--standalone | --keep-upstream | --upstream <host>]
   time-sync.sh sync-from <time-server-address> [--backup <directory>]
   time-sync.sh restore <saved-settings-file>
   time-sync.sh check
@@ -121,6 +128,11 @@ Modes:
   set-time      set the clock and turn synchronization off
   time-server   make this device a time server (udp/123)
   sync-from     follow a server configured with time-server
+
+time-server sync (pick one; default is --standalone):
+  --standalone      local clock only, no upstream (installer default)
+  --keep-upstream   keep upstream NTP servers already on the device
+  --upstream <host> follow upstream host(s); comma-separated or repeat the flag
   check         show the time, server role, and upstream server address
   restore       restore settings from a file saved with --backup
 
@@ -141,6 +153,8 @@ Do not pass a password as an argument.
 
 --allow adds one network to the private ranges the server answers.
 CHRONOSYNC_ALLOW=a.b.c.d/nn does the same.
+CHRONOSYNC_SERVER_SYNC=standalone|keep|upstream selects the time-server sync mode.
+CHRONOSYNC_UPSTREAM=host1,host2 sets upstreams (implies --upstream).
 CHRONOSYNC_ENGINE=chrony|ntp|timesyncd forces the service.
 EOF
 }
@@ -151,12 +165,187 @@ need_cmd() {
   fi
 }
 
+set_server_sync_mode() {
+  local mode
+  mode=$1
+  if [ "$SERVER_SYNC_SET" -eq 1 ] && [ "$SERVER_SYNC" != "$mode" ]; then
+    die "Use only one of --standalone, --keep-upstream, or --upstream for time-server."
+  fi
+  SERVER_SYNC=$mode
+  SERVER_SYNC_SET=1
+  return 0
+}
+
+add_upstream_host() {
+  local host
+  host=$1
+  trim_line "$host"
+  host=$TRIMMED
+  if [ -z "$host" ]; then
+    return 0
+  fi
+  case "$host" in
+    *:*)
+      die "An IPv4 address or DNS name is required for --upstream. IPv6 is not supported: ${host}"
+      ;;
+  esac
+  if ! valid_host "$host"; then
+    die "Invalid upstream address: ${host}"
+  fi
+  case " ${UPSTREAM_LIST} " in
+    *" ${host} "*)
+      return 0
+      ;;
+  esac
+  if [ -z "$UPSTREAM_LIST" ]; then
+    UPSTREAM_LIST=$host
+  else
+    UPSTREAM_LIST="${UPSTREAM_LIST} ${host}"
+  fi
+  return 0
+}
+
+add_upstream_list_from_csv() {
+  local rest word
+  rest=$1
+  trim_line "$rest"
+  rest=$TRIMMED
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      *,*)
+        word=${rest%%,*}
+        rest=${rest#*,}
+        ;;
+      *)
+        word=$rest
+        rest=
+        ;;
+    esac
+    trim_line "$word"
+    add_upstream_host "$TRIMMED"
+  done
+  return 0
+}
+
+apply_chronosync_upstream_env() {
+  if [ -n "${CHRONOSYNC_UPSTREAM:-}" ]; then
+    set_server_sync_mode upstream
+    add_upstream_list_from_csv "${CHRONOSYNC_UPSTREAM}"
+  fi
+  case "${CHRONOSYNC_SERVER_SYNC:-}" in
+    "")
+      ;;
+    standalone|keep|upstream)
+      set_server_sync_mode "${CHRONOSYNC_SERVER_SYNC}"
+      ;;
+    *)
+      die "CHRONOSYNC_SERVER_SYNC must be standalone, keep, or upstream."
+      ;;
+  esac
+  return 0
+}
+
+parse_time_server_option() {
+  local opt arg
+  opt=$1
+  arg=$2
+  case "$opt" in
+    --standalone)
+      set_server_sync_mode standalone
+      return 0
+      ;;
+    --keep-upstream)
+      set_server_sync_mode keep
+      return 0
+      ;;
+    --upstream)
+      if [ -z "$arg" ]; then
+        die "--upstream requires an NTP server address (IPv4 or DNS name)."
+      fi
+      set_server_sync_mode upstream
+      add_upstream_list_from_csv "$arg"
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+parse_time_server_rest() {
+  local rest word time_rest consumed
+  time_rest=
+  rest=$REST
+  trim_line "$rest"
+  rest=$TRIMMED
+  while [ -n "$rest" ]; do
+  case "$rest" in
+    *" "*)
+      word=${rest%% *}
+      rest=${rest#* }
+      trim_line "$rest"
+      rest=$TRIMMED
+      ;;
+    *)
+      word=$rest
+      rest=
+      ;;
+  esac
+    consumed=0
+    case "$word" in
+      --standalone|--keep-upstream)
+        parse_time_server_option "$word" ""
+        consumed=1
+        ;;
+      --upstream)
+        case "$rest" in
+          "")
+            die "--upstream requires an NTP server address (IPv4 or DNS name)."
+            ;;
+          *" "*)
+            arg=${rest%% *}
+            rest=${rest#* }
+            trim_line "$rest"
+            rest=$TRIMMED
+            ;;
+          *)
+            arg=$rest
+            rest=
+            ;;
+        esac
+        parse_time_server_option --upstream "$arg"
+        consumed=1
+        ;;
+      --)
+        if [ -n "$rest" ]; then
+          time_rest="${time_rest} ${rest}"
+        fi
+        rest=
+        break
+        ;;
+      -*)
+        die "Unknown option for time-server: ${word}"
+        ;;
+      *)
+        time_rest="${time_rest} ${word}"
+        ;;
+    esac
+  done
+  trim_line "$time_rest"
+  REST=$TRIMMED
+  return 0
+}
+
 parse_args() {
   DRY_RUN=0
   ACTION=
   REST=
   ALLOW=
   ALLOW_FLAG=0
+  SERVER_SYNC=standalone
+  SERVER_SYNC_SET=0
+  UPSTREAM_LIST=
+  SERVER_UPSTREAM_CSV=
   BACKUP_DIR=
   RESTORE_FILE=
   while [ $# -gt 0 ]; do
@@ -178,6 +367,17 @@ parse_args() {
         fi
         ALLOW=$2
         ALLOW_FLAG=1
+        shift 2
+        ;;
+      --standalone|--keep-upstream)
+        parse_time_server_option "$1" ""
+        shift
+        ;;
+      --upstream)
+        if [ $# -lt 2 ]; then
+          die "--upstream requires an NTP server address (IPv4 or DNS name)."
+        fi
+        parse_time_server_option --upstream "$2"
         shift 2
         ;;
       -h|--help)
@@ -250,7 +450,13 @@ parse_args() {
       die "--allow is only valid with time-server"
     fi
     ALLOW=
+    if [ "$SERVER_SYNC_SET" -eq 1 ]; then
+      die "--standalone, --keep-upstream, and --upstream are only valid with time-server"
+    fi
+    SERVER_SYNC=standalone
+    UPSTREAM_LIST=
   fi
+  apply_chronosync_upstream_env
   case "$ACTION" in
     set-time|time-server|sync-from)
       ;;
@@ -433,6 +639,10 @@ validate_args() {
       fi
       ;;
     time-server)
+      parse_time_server_rest
+      if [ "$SERVER_SYNC" = "upstream" ] && [ -z "$UPSTREAM_LIST" ]; then
+        die "No upstream server was specified. Use --upstream <host> or CHRONOSYNC_UPSTREAM."
+      fi
       if [ -n "$REST" ]; then
         if ! prepare_time "$REST"; then
           die "Invalid time: ${REST}. Expected Unix seconds or a date YYYY-MM-DD HH:MM:SS."
@@ -940,6 +1150,42 @@ restrict -4 ${net} mask ${mask} nomodify notrap"
   printf '%s\n' "$base"
 }
 
+build_ntp_both_conf() {
+  local rest word host block extra drift
+  drift=$(ntp_drift_path)
+  block=$(build_ntp_server_conf) || return 1
+  extra=
+  rest=$1
+  trim_line "$rest"
+  rest=$TRIMMED
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      *,*)
+        word=${rest%%,*}
+        rest=${rest#*,}
+        ;;
+      *)
+        word=$rest
+        rest=
+        ;;
+    esac
+    trim_line "$word"
+    host=$TRIMMED
+    if [ -z "$host" ]; then
+      continue
+    fi
+    extra="${extra}
+server ${host} iburst
+restrict -4 ${host} nomodify notrap noquery"
+  done
+  if [ -n "$extra" ]; then
+    printf '%s\n%s\n' "$block" "$extra"
+  else
+    printf '%s\n' "$block"
+  fi
+  return 0
+}
+
 build_ntp_client_conf() {
   local drift
   drift=$(ntp_drift_path)
@@ -1000,6 +1246,10 @@ apply_config() {
       path=$(chrony_conf_path) || return 1
       content=$(build_chrony_server_conf) || return 1
       ;;
+    chrony:both)
+      path=$(chrony_conf_path) || return 1
+      content=$(build_chrony_both_conf "$SERVER_UPSTREAM_CSV") || return 1
+      ;;
     chrony:client)
       path=$(chrony_conf_path) || return 1
       content=$(build_chrony_client_conf) || return 1
@@ -1007,6 +1257,10 @@ apply_config() {
     ntp:server)
       path=$(ntp_conf_path) || return 1
       content=$(build_ntp_server_conf) || return 1
+      ;;
+    ntp:both)
+      path=$(ntp_conf_path) || return 1
+      content=$(build_ntp_both_conf "$SERVER_UPSTREAM_CSV") || return 1
       ;;
     ntp:client)
       path=$(ntp_conf_path) || return 1
@@ -1058,13 +1312,107 @@ prepare_dirs() {
   return 0
 }
 
+upstreams_to_csv() {
+  if [ -z "$UPSTREAM_LIST" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  printf '%s\n' "$UPSTREAM_LIST" | tr ' ' ','
+  return 0
+}
+
+scan_config_upstreams() {
+  local kind
+  UPSTREAM_LIST=
+  for kind in chrony ntp timesyncd; do
+    collect_configs "$kind"
+    parse_time_config "$kind" "$COLLECTED" || continue
+    add_words_upstream "$ROLE_UPSTREAMS"
+    if [ "$kind" = timesyncd ]; then
+      add_words_upstream "$TS_NTP"
+      add_words_upstream "$TS_FALLBACK"
+    fi
+  done
+  return 0
+}
+
+resolve_time_server_upstreams() {
+  SERVER_UPSTREAM_CSV=
+  case "$SERVER_SYNC" in
+    standalone)
+      UPSTREAM_LIST=
+      return 0
+      ;;
+    keep)
+      scan_config_upstreams
+      if [ -z "$UPSTREAM_LIST" ]; then
+        log "Warning: no upstream NTP servers were found in the current configuration."
+        log "Warning: continuing as a standalone time server."
+        SERVER_SYNC=standalone
+      fi
+      ;;
+    upstream)
+      ;;
+    *)
+      die "Internal error: unknown server sync mode: ${SERVER_SYNC}"
+      ;;
+  esac
+  if [ -n "$UPSTREAM_LIST" ]; then
+    SERVER_UPSTREAM_CSV=$(upstreams_to_csv)
+  fi
+  return 0
+}
+
+time_server_config_role() {
+  if [ -n "$SERVER_UPSTREAM_CSV" ]; then
+    printf '%s\n' both
+  else
+    printf '%s\n' server
+  fi
+  return 0
+}
+
+verify_upstream_sync() {
+  local i limit
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf '[dry-run] check synchronization with upstream time server(s)\n'
+    return 0
+  fi
+  if [ -z "$SERVER_UPSTREAM_CSV" ]; then
+    return 0
+  fi
+  limit=30
+  i=0
+  while [ "$i" -lt "$limit" ]; do
+    case "$ENGINE" in
+      chrony)
+        if chrony_client_synced; then
+          LC_ALL=C chronyc makestep >/dev/null 2>&1 || true
+          return 0
+        fi
+        ;;
+      ntp)
+        if ntp_client_synced; then
+          return 0
+        fi
+        ;;
+    esac
+    i=$((i + 1))
+    sleep 1
+  done
+  return 1
+}
+
 write_state() {
-  local content
+  local content upstream_csv
+  upstream_csv=$(upstreams_to_csv)
   content=$(cat <<EOF
 mode=${ACTION}
 engine=${ENGINE}
 server=${SERVER}
 allow=${ALLOW}
+server_sync=${SERVER_SYNC}
+upstreams=${upstream_csv}
 EOF
 )
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -2037,9 +2385,8 @@ apply_restore_config() {
       content=$(build_ntp_client_conf) || return 1
       ;;
     ntp:both)
-      SERVER=$(first_backup_server "$BACKUP_SERVERS")
       path=$(ntp_conf_path) || return 1
-      content=$(build_ntp_server_conf) || return 1
+      content=$(build_ntp_both_conf "$BACKUP_SERVERS") || return 1
       ;;
     timesyncd:client)
       path=/etc/systemd/timesyncd.conf.d/chronosync.conf
@@ -2320,8 +2667,22 @@ do_set_time() {
 }
 
 do_time_server() {
+  local config_role ok_extra
   log "Mode: time server."
   maybe_backup_before_change || return 1
+  resolve_time_server_upstreams
+  config_role=$(time_server_config_role)
+  case "$SERVER_SYNC" in
+    standalone)
+      log "Upstream sync: off (standalone local clock)."
+      ;;
+    keep)
+      log "Upstream sync: keeping configured server(s): $(printf '%s' "$SERVER_UPSTREAM_CSV" | tr ',' ' ')."
+      ;;
+    upstream)
+      log "Upstream sync: $(printf '%s' "$SERVER_UPSTREAM_CSV" | tr ',' ' ')."
+      ;;
+  esac
   ensure_engine server || die "Could not prepare the time service."
   disable_all_time_services || return 1
   if [ -n "$NORM_SPEC" ]; then
@@ -2330,7 +2691,7 @@ do_time_server() {
     log "Warning: no time was given. The server will serve the current device clock."
     sync_rtc || true
   fi
-  apply_config server || die "Could not write the time server configuration."
+  apply_config "$config_role" || die "Could not write the time server configuration."
   prepare_dirs || die "Could not prepare time-service directories."
   open_firewall || true
   choose_unit || die "Could not select the time service."
@@ -2342,14 +2703,33 @@ do_time_server() {
     show_time_debug "$UNIT"
     die "Service ${UNIT} is running, but it is not serving time."
   fi
+  if [ "$config_role" = "both" ]; then
+    if verify_upstream_sync; then
+      sync_rtc || true
+    else
+      log "Warning: the time server is listening, but upstream synchronization is not ready yet."
+      log "Warning: clients may still use this server once the upstream link becomes available."
+    fi
+  fi
   write_state || die "Could not write state."
   log "The time server is listening on udp/123."
-  log "It serves the configured time and does not follow the Internet."
-  log "Run time-server again with a new time to correct the clock."
+  case "$SERVER_SYNC" in
+    standalone)
+      log "It serves the local clock and does not follow upstream servers."
+      log "Run time-server again with a new time to correct the clock."
+      ;;
+    keep|upstream)
+      log "It serves time to the local network and follows the configured upstream server(s)."
+      ;;
+  esac
   log "On the other devices, run sync-from with one of these addresses:"
   print_addresses
   show_brief_status || true
-  print_ok "mode=time-server engine=${ENGINE}"
+  ok_extra="sync=${SERVER_SYNC}"
+  if [ -n "$SERVER_UPSTREAM_CSV" ]; then
+    ok_extra="${ok_extra} upstream=${SERVER_UPSTREAM_CSV}"
+  fi
+  print_ok "mode=time-server engine=${ENGINE} ${ok_extra}"
 }
 
 do_sync_from() {
@@ -2547,6 +2927,32 @@ NTP=8.8.8.8"
     printf 'FAIL multi client\n' >&2
     FAILS=$((FAILS + 1))
   fi
+
+  conf=$(build_chrony_both_conf "10.0.0.5,ntp.example.com")
+  if printf '%s\n' "$conf" | grep -q '^local stratum 8' \
+      && printf '%s\n' "$conf" | grep -q '^server 10.0.0.5 iburst' \
+      && printf '%s\n' "$conf" | grep -q '^server ntp.example.com iburst'; then
+    printf 'ok %s\n' "chrony both"
+  else
+    printf 'FAIL chrony both\n' >&2
+    FAILS=$((FAILS + 1))
+  fi
+
+  conf=$(build_ntp_both_conf "10.0.0.5,ntp.example.com")
+  if printf '%s\n' "$conf" | grep -q '^server 127.127.1.0 minpoll 4 maxpoll 4' \
+      && printf '%s\n' "$conf" | grep -q '^server 10.0.0.5 iburst' \
+      && printf '%s\n' "$conf" | grep -q '^restrict -4 10.0.0.5 nomodify notrap noquery'; then
+    printf 'ok %s\n' "ntp both"
+  else
+    printf 'FAIL ntp both\n' >&2
+    FAILS=$((FAILS + 1))
+  fi
+
+  UPSTREAM_LIST=
+  SERVER_SYNC=standalone
+  SERVER_SYNC_SET=0
+  add_upstream_list_from_csv "10.0.0.1,ntp.example.com"
+  check_eq "upstream parse" "$UPSTREAM_LIST" "10.0.0.1 ntp.example.com"
 
   PARSE_TMP="/tmp/chronosync-selftest-backup.$$"
   printf '%s\n' "# chronosync-backup v1
