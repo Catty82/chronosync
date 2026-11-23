@@ -59,7 +59,9 @@ ALLOW_FLAG=0
 SERVER_SYNC=standalone
 SERVER_SYNC_SET=0
 UPSTREAM_LIST=
+UPSTREAM_KINDS=
 SERVER_UPSTREAM_CSV=
+SERVER_UPSTREAM_KINDS=
 ENGINE=
 SERVER=
 NORM_KIND=
@@ -207,8 +209,10 @@ add_upstream_host() {
   esac
   if [ -z "$UPSTREAM_LIST" ]; then
     UPSTREAM_LIST=$host
+    UPSTREAM_KINDS=server
   else
     UPSTREAM_LIST="${UPSTREAM_LIST} ${host}"
+    UPSTREAM_KINDS="${UPSTREAM_KINDS} server"
   fi
   return 0
 }
@@ -353,7 +357,9 @@ parse_args() {
   SERVER_SYNC=standalone
   SERVER_SYNC_SET=0
   UPSTREAM_LIST=
+  UPSTREAM_KINDS=
   SERVER_UPSTREAM_CSV=
+  SERVER_UPSTREAM_KINDS=
   BACKUP_DIR=
   RESTORE_FILE=
   while [ $# -gt 0 ]; do
@@ -463,6 +469,7 @@ parse_args() {
     fi
     SERVER_SYNC=standalone
     UPSTREAM_LIST=
+    UPSTREAM_KINDS=
   fi
   apply_chronosync_upstream_env
   case "$ACTION" in
@@ -1159,33 +1166,9 @@ restrict -4 ${net} mask ${mask} nomodify notrap"
 }
 
 build_ntp_both_conf() {
-  local rest word host block extra drift
-  drift=$(ntp_drift_path)
+  local block extra
   block=$(build_ntp_server_conf) || return 1
-  extra=
-  rest=$1
-  trim_line "$rest"
-  rest=$TRIMMED
-  while [ -n "$rest" ]; do
-    case "$rest" in
-      *,*)
-        word=${rest%%,*}
-        rest=${rest#*,}
-        ;;
-      *)
-        word=$rest
-        rest=
-        ;;
-    esac
-    trim_line "$word"
-    host=$TRIMMED
-    if [ -z "$host" ]; then
-      continue
-    fi
-    extra="${extra}
-server ${host} iburst
-restrict -4 ${host} nomodify notrap noquery"
-  done
+  extra=$(format_upstream_lines ntp "$1" "${2:-}")
   if [ -n "$extra" ]; then
     printf '%s\n%s\n' "$block" "$extra"
   else
@@ -1256,7 +1239,7 @@ apply_config() {
       ;;
     chrony:both)
       path=$(chrony_conf_path) || return 1
-      content=$(build_chrony_both_conf "$SERVER_UPSTREAM_CSV") || return 1
+      content=$(build_chrony_both_conf "$SERVER_UPSTREAM_CSV" "$SERVER_UPSTREAM_KINDS") || return 1
       ;;
     chrony:client)
       path=$(chrony_conf_path) || return 1
@@ -1268,7 +1251,7 @@ apply_config() {
       ;;
     ntp:both)
       path=$(ntp_conf_path) || return 1
-      content=$(build_ntp_both_conf "$SERVER_UPSTREAM_CSV") || return 1
+      content=$(build_ntp_both_conf "$SERVER_UPSTREAM_CSV" "$SERVER_UPSTREAM_KINDS") || return 1
       ;;
     ntp:client)
       path=$(ntp_conf_path) || return 1
@@ -1329,30 +1312,153 @@ upstreams_to_csv() {
   return 0
 }
 
+kinds_to_csv() {
+  if [ -z "$UPSTREAM_KINDS" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  printf '%s\n' "$UPSTREAM_KINDS" | tr ' ' ','
+  return 0
+}
+
+append_upstream_entry() {
+  local directive host
+  directive=$1
+  host=$2
+  case "$directive" in
+    server|pool|peer)
+      ;;
+    *)
+      directive=server
+      ;;
+  esac
+  case " ${UPSTREAM_LIST} " in
+    *" ${host} "*)
+      return 0
+      ;;
+  esac
+  if [ -z "$UPSTREAM_LIST" ]; then
+    UPSTREAM_LIST=$host
+    UPSTREAM_KINDS=$directive
+  else
+    UPSTREAM_LIST="${UPSTREAM_LIST} ${host}"
+    UPSTREAM_KINDS="${UPSTREAM_KINDS} ${directive}"
+  fi
+  return 0
+}
+
+remember_upstream_host() {
+  local directive host
+  directive=$1
+  host=$2
+  trim_line "$host"
+  host=$TRIMMED
+  case "$host" in
+    ""|127.127.*)
+      return 0
+      ;;
+    *:*)
+      return 0
+      ;;
+  esac
+  if ! valid_host "$host"; then
+    log "Warning: skipping upstream that is not an IPv4 address or DNS name: ${host}"
+    return 0
+  fi
+  append_upstream_entry "$directive" "$host"
+  return 0
+}
+
+remember_words_as_server() {
+  local rest word
+  rest=$1
+  trim_line "$rest"
+  rest=$TRIMMED
+  while [ -n "$rest" ]; do
+    word=${rest%% *}
+    remember_upstream_host server "$word"
+    case "$rest" in
+      *" "*)
+        rest=${rest#* }
+        trim_line "$rest"
+        rest=$TRIMMED
+        ;;
+      *)
+        rest=
+        ;;
+    esac
+  done
+  return 0
+}
+
+remember_upstreams_from_text() {
+  local kind line word host
+  kind=$1
+  PARSE_TMP="/tmp/chronosync-parse.$$"
+  printf '%s\n' "$2" > "$PARSE_TMP" || return 1
+  while IFS= read -r line; do
+    line=${line%%#*}
+    trim_line "$line"
+    line=$TRIMMED
+    if [ -z "$line" ]; then
+      continue
+    fi
+    case "$kind" in
+      timesyncd)
+        case "$line" in
+          NTP=*)
+            remember_words_as_server "${line#NTP=}"
+            ;;
+          FallbackNTP=*)
+            remember_words_as_server "${line#FallbackNTP=}"
+            ;;
+        esac
+        continue
+        ;;
+    esac
+    word=${line%% *}
+    case "$line" in
+      *" "*)
+        host=${line#* }
+        host=${host%% *}
+        ;;
+      *)
+        host=
+        ;;
+    esac
+    case "$word" in
+      server|pool|peer)
+        remember_upstream_host "$word" "$host"
+        ;;
+    esac
+  done < "$PARSE_TMP"
+  rm -f "$PARSE_TMP"
+  PARSE_TMP=
+  return 0
+}
+
 scan_config_upstreams() {
   local kind
   UPSTREAM_LIST=
+  UPSTREAM_KINDS=
   for kind in chrony ntp timesyncd; do
     collect_configs "$kind"
-    parse_time_config "$kind" "$COLLECTED" || continue
-    add_words_upstream "$ROLE_UPSTREAMS"
-    if [ "$kind" = timesyncd ]; then
-      add_words_upstream "$TS_NTP"
-      add_words_upstream "$TS_FALLBACK"
-    fi
+    remember_upstreams_from_text "$kind" "$COLLECTED" || return 1
   done
   return 0
 }
 
 resolve_time_server_upstreams() {
   SERVER_UPSTREAM_CSV=
+  SERVER_UPSTREAM_KINDS=
   case "$SERVER_SYNC" in
     standalone)
       UPSTREAM_LIST=
+      UPSTREAM_KINDS=
       return 0
       ;;
     keep)
-      scan_config_upstreams
+      scan_config_upstreams || return 1
       if [ -z "$UPSTREAM_LIST" ]; then
         log "Warning: no upstream NTP servers were found in the current configuration."
         log "Warning: continuing as a standalone time server."
@@ -1367,7 +1473,75 @@ resolve_time_server_upstreams() {
   esac
   if [ -n "$UPSTREAM_LIST" ]; then
     SERVER_UPSTREAM_CSV=$(upstreams_to_csv)
+    SERVER_UPSTREAM_KINDS=$(kinds_to_csv)
   fi
+  return 0
+}
+
+format_upstream_lines() {
+  local style hosts kinds rest_h rest_k host kind lines
+  style=$1
+  hosts=$2
+  kinds=$3
+  rest_h=$hosts
+  rest_k=$kinds
+  trim_line "$rest_h"
+  rest_h=$TRIMMED
+  trim_line "$rest_k"
+  rest_k=$TRIMMED
+  lines=
+  while [ -n "$rest_h" ]; do
+    case "$rest_h" in
+      *,*)
+        host=${rest_h%%,*}
+        rest_h=${rest_h#*,}
+        ;;
+      *)
+        host=$rest_h
+        rest_h=
+        ;;
+    esac
+    trim_line "$host"
+    host=$TRIMMED
+    if [ -n "$rest_k" ]; then
+      case "$rest_k" in
+        *,*)
+          kind=${rest_k%%,*}
+          rest_k=${rest_k#*,}
+          ;;
+        *)
+          kind=$rest_k
+          rest_k=
+          ;;
+      esac
+      trim_line "$kind"
+      kind=$TRIMMED
+    else
+      kind=server
+    fi
+    case "$kind" in
+      server|pool|peer)
+        ;;
+      *)
+        kind=server
+        ;;
+    esac
+    if [ -z "$host" ]; then
+      continue
+    fi
+    case "$style" in
+      chrony)
+        lines="${lines}
+${kind} ${host} iburst"
+        ;;
+      ntp)
+        lines="${lines}
+${kind} ${host} iburst
+restrict -4 ${host} nomodify notrap noquery"
+        ;;
+    esac
+  done
+  printf '%s\n' "$lines"
   return 0
 }
 
@@ -2272,7 +2446,7 @@ first_backup_server() {
 }
 
 build_chrony_both_conf() {
-  local rest word block
+  local extra block
   block=$(cat <<EOF
 # chronosync-managed
 # Time server that also synchronizes from the listed sources.
@@ -2290,22 +2464,11 @@ EOF
     block="${block}
 allow ${ALLOW}"
   fi
-  rest=$1
-  while [ -n "$rest" ]; do
-    word=${rest%%,*}
-    if [ -n "$word" ]; then
-      block="${block}
-server ${word} iburst"
-    fi
-    case "$rest" in
-      *,*)
-        rest=${rest#*,}
-        ;;
-      *)
-        rest=
-        ;;
-    esac
-  done
+  extra=$(format_upstream_lines chrony "$1" "${2:-}")
+  if [ -n "$extra" ]; then
+    block="${block}
+${extra}"
+  fi
   printf '%s\n' "$block"
 }
 
@@ -2957,10 +3120,34 @@ NTP=8.8.8.8"
   fi
 
   UPSTREAM_LIST=
+  UPSTREAM_KINDS=
   SERVER_SYNC=standalone
   SERVER_SYNC_SET=0
   add_upstream_list_from_csv "10.0.0.1,ntp.example.com"
   check_eq "upstream parse" "$UPSTREAM_LIST" "10.0.0.1 ntp.example.com"
+  check_eq "upstream kinds" "$UPSTREAM_KINDS" "server server"
+
+  UPSTREAM_LIST=
+  UPSTREAM_KINDS=
+  remember_upstreams_from_text chrony "pool ntp.ubuntu.com iburst maxsources 4
+pool 0.ubuntu.pool.ntp.org iburst maxsources 1
+pool 1.ubuntu.pool.ntp.org iburst maxsources 1
+pool 2.ubuntu.pool.ntp.org iburst maxsources 2
+# pool ignored.example iburst
+server 127.127.1.0
+server 10.1.2.3 iburst" || die "remember ubuntu pools"
+  check_eq "keep hosts" "$UPSTREAM_LIST" "ntp.ubuntu.com 0.ubuntu.pool.ntp.org 1.ubuntu.pool.ntp.org 2.ubuntu.pool.ntp.org 10.1.2.3"
+  check_eq "keep kinds" "$UPSTREAM_KINDS" "pool pool pool pool server"
+  conf=$(build_chrony_both_conf "$(upstreams_to_csv)" "$(kinds_to_csv)")
+  if printf '%s\n' "$conf" | grep -q '^pool ntp.ubuntu.com iburst' \
+      && printf '%s\n' "$conf" | grep -q '^pool 2.ubuntu.pool.ntp.org iburst' \
+      && printf '%s\n' "$conf" | grep -q '^server 10.1.2.3 iburst' \
+      && ! printf '%s\n' "$conf" | grep -q '127.127.1.0 iburst'; then
+    printf 'ok %s\n' "keep pool lines"
+  else
+    printf 'FAIL keep pool lines\n' >&2
+    FAILS=$((FAILS + 1))
+  fi
 
   PARSE_TMP="/tmp/chronosync-selftest-backup.$$"
   printf '%s\n' "# chronosync-backup v1
