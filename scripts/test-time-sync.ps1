@@ -174,6 +174,17 @@ try {
   Remove-Item Env:CHRONOSYNC_ALLOW -ErrorAction SilentlyContinue
 }
 
+Invoke-Case 'dry internet' 0 @('--dry-run', 'sync-from', '--internet')
+Assert-Contains 'internet peers' 'NtpServer=0.pool.ntp.org,0x8 1.pool.ntp.org,0x8 2.pool.ntp.org,0x8 3.pool.ntp.org,0x8'
+Assert-Contains 'internet mode' 'клиент публичного NTP-пула'
+Assert-Contains 'internet ok' 'CHRONOSYNC_OK mode=sync-from engine=w32time server=internet upstream=0.pool.ntp.org,1.pool.ntp.org,2.pool.ntp.org,3.pool.ntp.org'
+Assert-NotContains 'internet server on' 'TimeProviders\NtpServer Enabled=1'
+
+Invoke-Case 'dry internet word' 0 @('--dry-run', 'sync-from', 'internet')
+Assert-Contains 'internet word peer' '0.pool.ntp.org,0x8'
+Invoke-Case 'internet with host' 1 @('--dry-run', 'sync-from', '--internet', '192.168.0.10')
+Invoke-Case 'internet on server' 1 @('--dry-run', 'time-server', '--internet')
+
 Invoke-Case 'dry client' 0 @('--dry-run', 'sync-from', '192.168.0.10')
 Assert-Contains 'client server' 'NtpServer=192.168.0.10,0x8'
 Assert-Contains 'client type' 'Type=NTP'

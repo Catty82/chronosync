@@ -16,6 +16,7 @@
 #   time-sync.sh time-server [time] [--standalone | --keep-upstream | --upstream <host>[,<host>...]]
 #                             [--allow a.b.c.d/nn] [--backup <directory>]
 #   time-sync.sh sync-from <time-server-ip> [--backup <directory>]
+#   time-sync.sh sync-from --internet [--backup <directory>]
 #   time-sync.sh restore <saved-settings-file>
 #   time-sync.sh check
 #
@@ -25,6 +26,7 @@
 #   time-sync.sh time-server --keep-upstream --backup time-sync-settings
 #   time-sync.sh time-server --upstream 10.0.0.1,pool.ntp.org
 #   time-sync.sh sync-from 192.168.0.10
+#   time-sync.sh sync-from --internet
 #   time-sync.sh --backup /var/lib/chronosync/backups set-time 1761307080
 #   time-sync.sh restore /var/lib/chronosync/backups/client
 #
@@ -62,6 +64,7 @@ UPSTREAM_LIST=
 UPSTREAM_KINDS=
 SERVER_UPSTREAM_CSV=
 SERVER_UPSTREAM_KINDS=
+CLIENT_INTERNET=0
 ENGINE=
 SERVER=
 NORM_KIND=
@@ -116,6 +119,7 @@ Usage:
   time-sync.sh set-time <time>
   time-sync.sh time-server [time] [--standalone | --keep-upstream | --upstream <host>]
   time-sync.sh sync-from <time-server-address> [--backup <directory>]
+  time-sync.sh sync-from --internet [--backup <directory>]
   time-sync.sh restore <saved-settings-file>
   time-sync.sh check
   time-sync.sh --dry-run <mode> [arguments]
@@ -140,11 +144,16 @@ time-server sync (pick one; default is --standalone):
   --keep-upstream   keep upstream NTP servers already on the device
   --upstream <host> follow upstream host(s); comma-separated or repeat the flag
 
+sync-from --internet follows the public NTP pool when the server name is unknown:
+  0.pool.ntp.org  1.pool.ntp.org  2.pool.ntp.org  3.pool.ntp.org
+The word internet (or интернет) is the same as --internet.
+
 Examples:
   time-sync.sh time-server 1761307080
   time-sync.sh time-server --keep-upstream --backup time-sync-settings
   time-sync.sh time-server --upstream 10.0.0.1,pool.ntp.org
   time-sync.sh sync-from 192.168.0.10
+  time-sync.sh sync-from --internet
 
 set-time only sets the clock and turns synchronization off.
 After set-time, run the role again:
@@ -360,6 +369,7 @@ parse_args() {
   UPSTREAM_KINDS=
   SERVER_UPSTREAM_CSV=
   SERVER_UPSTREAM_KINDS=
+  CLIENT_INTERNET=0
   BACKUP_DIR=
   RESTORE_FILE=
   while [ $# -gt 0 ]; do
@@ -393,6 +403,10 @@ parse_args() {
         fi
         parse_time_server_option --upstream "$2"
         shift 2
+        ;;
+      --internet)
+        CLIENT_INTERNET=1
+        shift
         ;;
       -h|--help)
         usage
@@ -470,6 +484,9 @@ parse_args() {
     SERVER_SYNC=standalone
     UPSTREAM_LIST=
     UPSTREAM_KINDS=
+  fi
+  if [ "$ACTION" != "sync-from" ] && [ "$CLIENT_INTERNET" -eq 1 ]; then
+    die "--internet is only valid with sync-from"
   fi
   apply_chronosync_upstream_env
   case "$ACTION" in
@@ -643,6 +660,20 @@ prepare_time() {
   return 0
 }
 
+set_internet_client() {
+  CLIENT_INTERNET=1
+  SERVER=internet
+  UPSTREAM_LIST=
+  UPSTREAM_KINDS=
+  append_upstream_entry pool 0.pool.ntp.org
+  append_upstream_entry pool 1.pool.ntp.org
+  append_upstream_entry pool 2.pool.ntp.org
+  append_upstream_entry pool 3.pool.ntp.org
+  SERVER_UPSTREAM_CSV=$(upstreams_to_csv)
+  SERVER_UPSTREAM_KINDS=$(kinds_to_csv)
+  return 0
+}
+
 validate_args() {
   case "$ACTION" in
     set-time)
@@ -671,21 +702,34 @@ validate_args() {
       fi
       ;;
     sync-from)
-      if [ -z "$REST" ]; then
-        die "Specify a server address: time-sync.sh sync-from <ip>"
-      fi
       case "$REST" in
-        *" "*)
-          die "The time server address must be a single argument, with no spaces."
-          ;;
-        *:*)
-          die "An IPv4 address or DNS name is required. IPv6 is not supported: ${REST}"
+        internet|интернет)
+          CLIENT_INTERNET=1
+          REST=
           ;;
       esac
-      if ! valid_host "$REST"; then
-        die "Invalid time server address: ${REST}"
+      if [ "$CLIENT_INTERNET" -eq 1 ]; then
+        if [ -n "$REST" ]; then
+          die "--internet does not take a server address. Use sync-from --internet"
+        fi
+        set_internet_client
+      else
+        if [ -z "$REST" ]; then
+          die "Specify a server address: time-sync.sh sync-from <ip>"
+        fi
+        case "$REST" in
+          *" "*)
+            die "The time server address must be a single argument, with no spaces."
+            ;;
+          *:*)
+            die "An IPv4 address or DNS name is required. IPv6 is not supported: ${REST}"
+            ;;
+        esac
+        if ! valid_host "$REST"; then
+          die "Invalid time server address: ${REST}"
+        fi
+        SERVER=$REST
       fi
-      SERVER=$REST
       ;;
     check)
       if [ -n "$REST" ]; then
@@ -1135,6 +1179,40 @@ server ${SERVER} iburst
 EOF
 }
 
+build_chrony_internet_conf() {
+  local extra block
+  block=$(cat <<EOF
+# chronosync-managed
+# The client follows the public NTP pool.
+driftfile /var/lib/chrony/chrony.drift
+rtcsync
+makestep 1.0 -1
+EOF
+)
+  extra=$(format_upstream_lines chrony "$SERVER_UPSTREAM_CSV" "$SERVER_UPSTREAM_KINDS")
+  printf '%s\n%s\n' "$block" "$extra"
+}
+
+build_ntp_internet_conf() {
+  local drift extra block
+  drift=$(ntp_drift_path)
+  extra=$(format_upstream_lines chrony "$SERVER_UPSTREAM_CSV" "$SERVER_UPSTREAM_KINDS")
+  block=$(cat <<EOF
+# chronosync-managed
+# The client follows the public NTP pool.
+driftfile ${drift}
+tinker panic 0
+step 0.128 0
+restrict -4 default ignore
+restrict -4 127.0.0.1
+restrict -6 default ignore
+restrict -6 ::1
+restrict source nomodify notrap noquery
+EOF
+)
+  printf '%s\n%s\n' "$block" "$extra"
+}
+
 build_ntp_server_conf() {
   local base pair net mask drift
   drift=$(ntp_drift_path)
@@ -1243,7 +1321,11 @@ apply_config() {
       ;;
     chrony:client)
       path=$(chrony_conf_path) || return 1
-      content=$(build_chrony_client_conf) || return 1
+      if [ "$CLIENT_INTERNET" -eq 1 ]; then
+        content=$(build_chrony_internet_conf) || return 1
+      else
+        content=$(build_chrony_client_conf) || return 1
+      fi
       ;;
     ntp:server)
       path=$(ntp_conf_path) || return 1
@@ -1255,11 +1337,19 @@ apply_config() {
       ;;
     ntp:client)
       path=$(ntp_conf_path) || return 1
-      content=$(build_ntp_client_conf) || return 1
+      if [ "$CLIENT_INTERNET" -eq 1 ]; then
+        content=$(build_ntp_internet_conf) || return 1
+      else
+        content=$(build_ntp_client_conf) || return 1
+      fi
       ;;
     timesyncd:client)
       path=/etc/systemd/timesyncd.conf.d/chronosync.conf
-      content=$(build_timesyncd_conf) || return 1
+      if [ "$CLIENT_INTERNET" -eq 1 ]; then
+        content=$(build_timesyncd_multi_conf "$SERVER_UPSTREAM_CSV") || return 1
+      else
+        content=$(build_timesyncd_conf) || return 1
+      fi
       ;;
     *)
       return 1
@@ -2904,7 +2994,12 @@ do_time_server() {
 }
 
 do_sync_from() {
-  log "Mode: client of time server ${SERVER}."
+  if [ "$CLIENT_INTERNET" -eq 1 ]; then
+    log "Mode: client of the public NTP pool."
+    log "Servers: ${UPSTREAM_LIST}."
+  else
+    log "Mode: client of time server ${SERVER}."
+  fi
   maybe_backup_before_change || return 1
   ensure_engine client || die "Could not prepare the time service."
   disable_all_time_services || return 1
@@ -2924,13 +3019,21 @@ do_sync_from() {
   fi
   if ! verify_client; then
     show_time_debug "$UNIT"
+    if [ "$CLIENT_INTERNET" -eq 1 ]; then
+      die "Could not synchronize with the public NTP pool. Check that outbound udp/123 is allowed."
+    fi
     die "Could not synchronize with ${SERVER}. Check that time-server was run there, udp/123 is open, and the address is reachable."
   fi
   sync_rtc || true
   write_state || die "Could not write state."
-  log "The device is synchronizing with ${SERVER}."
+  if [ "$CLIENT_INTERNET" -eq 1 ]; then
+    log "The device is synchronizing with the public NTP pool."
+    print_ok "mode=sync-from engine=${ENGINE} server=internet upstream=${SERVER_UPSTREAM_CSV}"
+  else
+    log "The device is synchronizing with ${SERVER}."
+    print_ok "mode=sync-from engine=${ENGINE} server=${SERVER}"
+  fi
   show_brief_status || true
-  print_ok "mode=sync-from engine=${ENGINE} server=${SERVER}"
 }
 
 expect_ok() {

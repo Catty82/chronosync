@@ -5,6 +5,7 @@
 #   time-sync.cmd time-server [время] [--standalone | --keep-upstream | --upstream <сервер>]
 #                             [--allow a.b.c.d/nn]
 #   time-sync.cmd sync-from <ip-или-имя-сервера>
+#   time-sync.cmd sync-from --internet
 #   time-sync.cmd check
 #
 # Почему PowerShell, а не batch и не Python.
@@ -50,6 +51,7 @@ $script:UpstreamList = New-Object System.Collections.Generic.List[string]
 $script:ServerUpstreamMode = 'none'
 $script:Engine = ''
 $script:Server = ''
+$script:ClientInternet = $false
 $script:NormKind = ''
 $script:NormSpec = ''
 $script:NormDto = $null
@@ -80,6 +82,7 @@ function Show-Usage {
   time-sync.cmd set-time <время>
   time-sync.cmd time-server [время] [--standalone | --keep-upstream | --upstream <сервер>]
   time-sync.cmd sync-from <адрес-сервера-времени>
+  time-sync.cmd sync-from --internet
   time-sync.cmd check
   time-sync.cmd --dry-run <режим> [аргументы]
   time-sync.cmd self-test
@@ -102,13 +105,19 @@ time-server и синхронизация (выберите один вариа�
   --keep-upstream   оставить текущие внешние серверы NTP на устройстве
   --upstream <сервер>  задать upstream; через запятую или повтор флага
 
+sync-from --internet берёт время из публичного NTP-пула, если имя сервера неизвестно:
+  0.pool.ntp.org  1.pool.ntp.org  2.pool.ntp.org  3.pool.ntp.org
+Слово internet (или интернет) означает то же, что --internet.
+
 Примеры:
   time-sync.cmd time-server --keep-upstream
   time-sync.cmd time-server --upstream 10.0.0.1,pool.ntp.org
+  time-sync.cmd sync-from --internet
 
 Дополнительные имена режимов: set, server, client, check, время, сервер, клиент, проверка.
 
-Служба — встроенная W32Time. Режим sync-from по-прежнему использует один указанный сервер.
+Служба — встроенная W32Time. sync-from с адресом использует один указанный сервер.
+sync-from --internet использует публичный NTP-пул.
 --allow добавляет одну сеть к частным диапазонам, которым сервер отдаёт время.
 То же самое делает переменная CHRONOSYNC_ALLOW=a.b.c.d/nn.
 CHRONOSYNC_SERVER_SYNC=standalone|keep|upstream выбирает режим для time-server.
@@ -352,6 +361,7 @@ function Parse-Arguments {
   $script:ServerSyncChosen = $false
   $script:UpstreamList = New-Object System.Collections.Generic.List[string]
   $script:ServerUpstreamMode = 'none'
+  $script:ClientInternet = $false
   $index = 0
   $literal = $false
   while ($index -lt $argv.Count) {
@@ -377,6 +387,11 @@ function Parse-Arguments {
       if (($index + 1) -ge $argv.Count) { Die '--upstream требует адрес сервера NTP (IPv4 или DNS).' }
       Parse-TimeServerOption '--upstream' ([string]$argv[$index + 1])
       $index += 2
+      continue
+    }
+    if (-not $literal -and $token -eq '--internet') {
+      $script:ClientInternet = $true
+      $index++
       continue
     }
     if (-not $literal -and ($token -eq '-h' -or $token -eq '--help')) {
@@ -421,6 +436,9 @@ function Parse-Arguments {
   if ([string]::IsNullOrEmpty($script:Allow) -and -not [string]::IsNullOrWhiteSpace([string]$env:CHRONOSYNC_ALLOW)) {
     $script:Allow = [string]$env:CHRONOSYNC_ALLOW
   }
+  if ($script:Action -ne 'sync-from' -and $script:ClientInternet) {
+    Die '--internet используется только вместе с sync-from'
+  }
   if ($script:Action -ne 'time-server') {
     if ($script:AllowFlag) { Die '--allow используется только вместе с time-server' }
     if ($script:ServerSyncChosen) {
@@ -454,6 +472,17 @@ function Assert-Arguments {
     return
   }
   if ($script:Action -eq 'sync-from') {
+    if ($script:Rest -eq 'internet' -or $script:Rest -eq 'интернет') {
+      $script:ClientInternet = $true
+      $script:Rest = ''
+    }
+    if ($script:ClientInternet) {
+      if (-not [string]::IsNullOrEmpty($script:Rest)) {
+        Die '--internet не принимает адрес сервера. Используйте sync-from --internet'
+      }
+      Enable-InternetClient
+      return
+    }
     if ([string]::IsNullOrEmpty($script:Rest)) { Die 'Укажите адрес сервера: time-sync.cmd sync-from <ip>' }
     if ($script:Rest.Contains(' ')) { Die 'Адрес сервера времени — один аргумент, без пробелов.' }
     if ($script:Rest.Contains(':')) { Die "Нужен IPv4-адрес или DNS-имя. IPv6 не поддерживается: $($script:Rest)" }
@@ -643,6 +672,31 @@ function Get-ServerSettingRows {
     'TimeProviders\NtpServer|Enabled|1|DWord'
     'TimeProviders\NtpServer|AllowNonstandardModeCombinations|1|DWord'
     'TimeProviders\NtpClient|Enabled|0|DWord'
+    'Config|UtilizeSslTimeData|0|DWord'
+    'TimeProviders\VMICTimeProvider|Enabled|0|DWord'
+  )
+  return ($rows -join "`n")
+}
+
+function Enable-InternetClient {
+  $script:ClientInternet = $true
+  $script:Server = 'internet'
+  $script:UpstreamList = New-Object System.Collections.Generic.List[string]
+  foreach ($pool in @('0.pool.ntp.org', '1.pool.ntp.org', '2.pool.ntp.org', '3.pool.ntp.org')) {
+    [void]$script:UpstreamList.Add($pool)
+  }
+}
+
+function Get-InternetClientSettingRows {
+  $peerField = ($script:UpstreamList | ForEach-Object { "$_,0x8" }) -join ' '
+  $rows = @(
+    'Parameters|Type|NTP|String'
+    ("Parameters|NtpServer|{0}|String" -f $peerField)
+    'Config|AnnounceFlags|10|DWord'
+    'Config|MaxPosPhaseCorrection|4294967295|DWord'
+    'Config|MaxNegPhaseCorrection|4294967295|DWord'
+    'TimeProviders\NtpClient|Enabled|1|DWord'
+    'TimeProviders\NtpServer|Enabled|0|DWord'
     'Config|UtilizeSslTimeData|0|DWord'
     'TimeProviders\VMICTimeProvider|Enabled|0|DWord'
   )
@@ -1245,29 +1299,72 @@ function Invoke-TimeServer {
   Write-Ok "mode=time-server engine=w32time $okExtra"
 }
 
+function Wait-InternetReady {
+  if ($script:DryRun) {
+    Write-Line '[dry-run] проверка синхронизации с публичным NTP-пулом'
+    return $true
+  }
+  $i = 0
+  while ($i -lt 20) {
+    if (($i % 4) -eq 0) { Invoke-W32tm '/resync' '/force' | Out-Null }
+    $query = Invoke-W32tm '/query' '/source'
+    if ($query.Code -eq 0 -and -not [string]::IsNullOrWhiteSpace([string]$query.Text)) {
+      $first = (($query.Text -split "`n")[0]).Trim().Trim("`r")
+      $src = (($first -split ',')[0]).Trim()
+      if ($src -notmatch '^(Local CMOS|Free-running)') { return $true }
+    }
+    Start-Sleep -Seconds 1
+    $i++
+  }
+  return $false
+}
+
 function Invoke-SyncFrom {
-  Write-Line "Режим: клиент сервера времени $($script:Server)."
+  if ($script:ClientInternet) {
+    Write-Line 'Режим: клиент публичного NTP-пула.'
+    Write-Line ("Серверы: $($script:UpstreamList -join ' ').")
+  } else {
+    Write-Line "Режим: клиент сервера времени $($script:Server)."
+  }
   Select-Engine
   Warn-IfPolicy
   Backup-W32Time
   Stop-TimeService
-  Apply-SettingRows (Get-ClientSettingRows)
+  if ($script:ClientInternet) {
+    Apply-SettingRows (Get-InternetClientSettingRows)
+  } else {
+    Apply-SettingRows (Get-ClientSettingRows)
+  }
   Remove-ChronoFirewall
-  Add-ClientFirewall
+  if ($script:ClientInternet) {
+    Write-Line 'Фаервол: публичный NTP-пул, отдельное исходящее правило udp/123 не добавлено.'
+  } else {
+    Add-ClientFirewall
+  }
   Set-TimeServiceStartMode 'Automatic'
   if (-not (Start-TimeService)) {
     Show-TimeDebug
     Die 'Не удалось запустить службу W32Time.'
   }
   Update-W32Config
-  if (-not (Wait-ClientReady)) {
+  $ready = $false
+  if ($script:ClientInternet) { $ready = Wait-InternetReady } else { $ready = Wait-ClientReady }
+  if (-not $ready) {
     Show-TimeDebug
+    if ($script:ClientInternet) {
+      Die 'Не удалось синхронизироваться с публичным NTP-пулом. Проверьте исходящий udp/123.'
+    }
     Die "Не удалось синхронизироваться с $($script:Server). Проверьте, что на нём выполнен time-server, открыт udp/123 и адрес доступен."
   }
   Write-StateFile
-  Write-Line "Устройство синхронизируется с $($script:Server)."
+  if ($script:ClientInternet) {
+    Write-Line 'Устройство синхронизируется с публичным NTP-пулом.'
+    Write-Ok "mode=sync-from engine=w32time server=internet upstream=$(Get-UpstreamCsv)"
+  } else {
+    Write-Line "Устройство синхронизируется с $($script:Server)."
+    Write-Ok "mode=sync-from engine=w32time server=$($script:Server)"
+  }
   Show-BriefStatus
-  Write-Ok "mode=sync-from engine=w32time server=$($script:Server)"
 }
 
 function Invoke-Check {
@@ -1414,6 +1511,14 @@ function Invoke-SelfTest {
   Expect-Fail 'client pool' ($clientRows.Contains('pool.ntp.org'))
   Expect-Fail 'client windows' ($clientRows.Contains('time.windows.com'))
   Expect-Fail 'client reliable' ($clientRows.Contains('AnnounceFlags|5|'))
+
+  Enable-InternetClient
+  $internetRows = Get-InternetClientSettingRows
+  Expect-Ok 'internet type' ($internetRows.Contains('Parameters|Type|NTP|String'))
+  Expect-Ok 'internet peers' ($internetRows.Contains('Parameters|NtpServer|0.pool.ntp.org,0x8 1.pool.ntp.org,0x8 2.pool.ntp.org,0x8 3.pool.ntp.org,0x8|String'))
+  Expect-Ok 'internet client on' ($internetRows.Contains('TimeProviders\NtpClient|Enabled|1|DWord'))
+  Expect-Ok 'internet server off' ($internetRows.Contains('TimeProviders\NtpServer|Enabled|0|DWord'))
+  Check-Eq 'internet csv' (Get-UpstreamCsv) '0.pool.ntp.org,1.pool.ntp.org,2.pool.ntp.org,3.pool.ntp.org'
 
   Check-Eq 'peers empty' (Get-PeersFromRaw '') ''
   Check-Eq 'peers one' (Get-PeersFromRaw '192.168.0.10,0x8') '192.168.0.10'
