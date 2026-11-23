@@ -81,6 +81,8 @@ assert_contains "help manual server" "does not distribute time"
 assert_contains "help check" "check"
 assert_contains "help restore" "restore"
 assert_contains "help backup" "--backup"
+assert_contains "help keep backup" "time-server --keep-upstream --backup time-sync-settings"
+assert_contains "help internet" "sync-from --internet"
 assert_not_contains "help ok" "CHRONOSYNC_OK"
 
 run_case "no args" 1 dash "$SCRIPT"
@@ -133,7 +135,8 @@ assert_contains "ru spec" "[dry-run] date -s 2026-10-24 14:18:00"
 run_case "dry server" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run time-server 1761307080
 assert_contains "server local" "local stratum 8"
 assert_contains "server allow" "allow 192.168.0.0/16"
-assert_contains "server ok" "CHRONOSYNC_OK mode=time-server engine=chrony"
+assert_contains "server ok" "CHRONOSYNC_OK mode=time-server engine=chrony sync=standalone"
+assert_contains "server standalone log" "Upstream sync: off (standalone local clock)."
 assert_contains "server unit" "[dry-run] systemctl enable chrony"
 assert_not_contains "server pool" "pool.ntp.org"
 if printf '%s\n' "$LAST_OUT" | grep -Eq '^server '; then
@@ -150,12 +153,53 @@ assert_not_contains "no date" "[dry-run] date -s"
 run_case "dry allow" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run time-server --allow 10.50.1.5/16 1761307080
 assert_contains "extra allow" "allow 10.50.1.5/16"
 
+run_case "dry server upstream" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run time-server --upstream 10.0.0.5,ntp.example.com 1761307080
+assert_contains "upstream local" "local stratum 8"
+assert_contains "upstream peer" "server 10.0.0.5 iburst"
+assert_contains "upstream dns" "server ntp.example.com iburst"
+assert_contains "upstream log" "Upstream sync: 10.0.0.5 ntp.example.com"
+assert_contains "upstream ok" "CHRONOSYNC_OK mode=time-server engine=chrony sync=upstream upstream=10.0.0.5,ntp.example.com"
+
+run_case "dry server explicit standalone" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run time-server --standalone 1761307080
+assert_not_contains "explicit upstream" "server 10.0.0.5 iburst"
+
+run_case "upstream on client" 1 dash "$SCRIPT" --dry-run sync-from --upstream 10.0.0.5 192.168.0.10
+run_case "upstream empty" 1 dash "$SCRIPT" --dry-run time-server --upstream
+run_case "upstream conflict" 1 dash "$SCRIPT" --dry-run time-server --standalone --upstream 10.0.0.5
+run_case "bad upstream" 1 dash "$SCRIPT" --dry-run time-server --upstream 192.168.0.256
+
 run_case "dry ntp server" 0 env CHRONOSYNC_ENGINE=ntp dash "$SCRIPT" --dry-run time-server --allow 10.50.1.5/16
 assert_contains "ntp local" "server 127.127.1.0 minpoll 4 maxpoll 4"
 assert_contains "ntp ignore" "restrict -4 default ignore"
 assert_contains "ntp extra" "restrict -4 10.50.0.0 mask 255.255.0.0 nomodify notrap"
-assert_contains "ntp ok" "CHRONOSYNC_OK mode=time-server engine=ntp"
+assert_contains "ntp ok" "CHRONOSYNC_OK mode=time-server engine=ntp sync=standalone"
 assert_not_contains "ntp pool" "pool.ntp.org"
+
+run_case "dry internet" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run sync-from --internet
+assert_contains "internet pool0" "pool 0.pool.ntp.org iburst"
+assert_contains "internet pool3" "pool 3.pool.ntp.org iburst"
+assert_contains "internet ok" "CHRONOSYNC_OK mode=sync-from engine=chrony server=internet upstream=0.pool.ntp.org,1.pool.ntp.org,2.pool.ntp.org,3.pool.ntp.org"
+assert_contains "internet mode" "client of the public NTP pool"
+assert_not_contains "internet local" "local stratum"
+assert_not_contains "internet single" "server 192.168.0.10 iburst"
+
+run_case "dry internet word" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run sync-from internet
+assert_contains "internet word pool" "pool 0.pool.ntp.org iburst"
+
+run_case "dry internet ru" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run sync-from интернет
+assert_contains "internet ru pool" "pool 1.pool.ntp.org iburst"
+
+run_case "internet with host" 1 dash "$SCRIPT" --dry-run sync-from --internet 192.168.0.10
+run_case "internet on server" 1 dash "$SCRIPT" --dry-run time-server --internet
+
+run_case "dry ntp internet" 0 env CHRONOSYNC_ENGINE=ntp dash "$SCRIPT" --dry-run sync-from --internet
+assert_contains "ntp internet pool" "pool 0.pool.ntp.org iburst"
+assert_contains "ntp internet source" "restrict source nomodify notrap noquery"
+assert_contains "ntp internet ok" "CHRONOSYNC_OK mode=sync-from engine=ntp server=internet"
+
+run_case "dry timesyncd internet" 0 env CHRONOSYNC_ENGINE=timesyncd dash "$SCRIPT" --dry-run sync-from --internet
+assert_contains "timesyncd internet" "NTP=0.pool.ntp.org 1.pool.ntp.org 2.pool.ntp.org 3.pool.ntp.org"
+assert_contains "timesyncd internet ok" "CHRONOSYNC_OK mode=sync-from engine=timesyncd server=internet"
 
 run_case "dry client" 0 env CHRONOSYNC_ENGINE=chrony dash "$SCRIPT" --dry-run sync-from 192.168.0.10
 assert_contains "client server" "server 192.168.0.10 iburst"
